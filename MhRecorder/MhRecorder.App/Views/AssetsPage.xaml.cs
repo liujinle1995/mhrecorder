@@ -173,7 +173,9 @@ public sealed partial class AssetsPage : Page
         var labelAreaHeight = 30;
         var valueAreaHeight = 24;
         var plotHeight = Math.Max(40, height - labelAreaHeight - valueAreaHeight);
-        var maxValue = recent.Max(p => Math.Max(p.Gold, p.Silver));
+        // 未知（null）不是 0：当天没有任何一张截图带金币时，这里不画柱子也不
+        // 报数字，避免"金币归零"的假信号。
+        var maxValue = recent.Max(p => Math.Max(p.Gold ?? 0, p.Silver ?? 0));
         if (maxValue <= 0) maxValue = 1;
 
         var slotWidth = width / recent.Count;
@@ -187,43 +189,37 @@ public sealed partial class AssetsPage : Page
             var barWidth = Math.Min(17, slotWidth * 0.16);
             var pairGap = 4;
             var pairWidth = barWidth * 2 + pairGap;
-
-            var goldHeight = Math.Max(4, plotHeight * (point.Gold / maxValue));
-            var silverHeight = Math.Max(4, plotHeight * (point.Silver / maxValue));
-
-            var goldBar = new Rectangle
-            {
-                Width = barWidth, Height = goldHeight, Fill = GoldBrush,
-                RadiusX = 3, RadiusY = 3,
-            };
-            Canvas.SetLeft(goldBar, center - pairWidth / 2);
-            Canvas.SetTop(goldBar, valueAreaHeight + (plotHeight - goldHeight));
-            RecentChartCanvas.Children.Add(goldBar);
-
-            var silverBar = new Rectangle
-            {
-                Width = barWidth, Height = silverHeight, Fill = SilverBrush,
-                RadiusX = 3, RadiusY = 3,
-            };
-            Canvas.SetLeft(silverBar, center - pairWidth / 2 + barWidth + pairGap);
-            Canvas.SetTop(silverBar, valueAreaHeight + (plotHeight - silverHeight));
-            RecentChartCanvas.Children.Add(silverBar);
-
             var valueColor = isCurrent ? BrandBlue : TextSecondary;
 
-            AddLabel(RecentChartCanvas, Fmt.Number(point.Gold),
+            DrawBar(point.Gold, GoldBrush, center - pairWidth / 2, barWidth);
+            DrawBar(point.Silver, SilverBrush, center - pairWidth / 2 + barWidth + pairGap, barWidth);
+
+            AddLabel(RecentChartCanvas, point.Gold is { } g ? Fmt.Number(g) : "—",
                 center - pairWidth / 2 - 10,
-                valueAreaHeight + (plotHeight - goldHeight) - 20,
+                valueAreaHeight + (plotHeight - BarHeight(point.Gold)) - 20,
                 barWidth + 32, 17, valueColor, 11.5, TextAlignment.Center);
 
-            AddLabel(RecentChartCanvas, Fmt.Number(point.Silver),
+            AddLabel(RecentChartCanvas, point.Silver is { } sv ? Fmt.Number(sv) : "—",
                 center - pairWidth / 2 + barWidth + pairGap - 10,
-                valueAreaHeight + (plotHeight - silverHeight) - 20,
+                valueAreaHeight + (plotHeight - BarHeight(point.Silver)) - 20,
                 barWidth + 32, 17, valueColor, 11.5, TextAlignment.Center);
 
             AddLabel(RecentChartCanvas, point.Date,
                 center - 30, valueAreaHeight + plotHeight + 9, 60, 17,
                 isCurrent ? BrandBlue : TextTertiary, 11.5, TextAlignment.Center);
+        }
+
+        double BarHeight(long? value) =>
+            value is { } v ? Math.Max(4, plotHeight * ((double)v / maxValue)) : 0;
+
+        void DrawBar(long? value, Brush fill, double left, double barWidth)
+        {
+            if (value is null) return;   // 未知字段不画柱
+            var h = BarHeight(value);
+            var bar = new Rectangle { Width = barWidth, Height = h, Fill = fill, RadiusX = 3, RadiusY = 3 };
+            Canvas.SetLeft(bar, left);
+            Canvas.SetTop(bar, valueAreaHeight + (plotHeight - h));
+            RecentChartCanvas.Children.Add(bar);
         }
     }
 

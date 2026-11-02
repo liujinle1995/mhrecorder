@@ -124,10 +124,31 @@ public sealed partial class ImportPage : Page
 
         SourceChipText.Text = $"来源：{screens} · {screenCount} 张截图";
 
-        // "why this character" — only present when the identity came from a
-        // fingerprint or 人物评分 rather than from the panel itself.
-        IdentityEvidenceText.Text = result.IdentityEvidence ?? string.Empty;
-        IdentityEvidenceText.Visibility = string.IsNullOrWhiteSpace(result.IdentityEvidence)
+        // "why this character" — only present when the identity came from
+        // evidence rather than from the panel itself.
+        var evidence = result.IdentityEvidence ?? string.Empty;
+
+        // 冲突：面板上的身份字段与视觉证据指向不同的人。后端已按游戏ID 定案，
+        // 这里把矛盾摆出来 —— 视觉模型退化时能一眼看见，而不是悄悄错下去。
+        if (result.Conflicts.Count > 0)
+        {
+            evidence = string.IsNullOrWhiteSpace(evidence)
+                ? string.Join(Environment.NewLine, result.Conflicts)
+                : evidence + Environment.NewLine + string.Join(Environment.NewLine, result.Conflicts);
+        }
+
+        // 候选：证据不足时不再猜，把排序后的候选连同各自依据交给你选。
+        if (result.Candidates.Count > 0 && string.IsNullOrEmpty(result.CharacterId))
+        {
+            var list = string.Join(Environment.NewLine,
+                result.Candidates.Select((c, i) => $"  {i + 1}. {c.Describe()}"));
+            evidence = string.IsNullOrWhiteSpace(evidence)
+                ? "候选：" + Environment.NewLine + list
+                : evidence + Environment.NewLine + "候选：" + Environment.NewLine + list;
+        }
+
+        IdentityEvidenceText.Text = evidence;
+        IdentityEvidenceText.Visibility = string.IsNullOrWhiteSpace(evidence)
             ? Visibility.Collapsed
             : Visibility.Visible;
 

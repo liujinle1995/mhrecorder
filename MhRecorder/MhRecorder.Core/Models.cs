@@ -21,8 +21,13 @@ public enum IdentitySource
     IdField,
     /// <summary>Nickname matched an existing character row.</summary>
     Nickname,
-    /// <summary>pHash/ORB snapshot matched a previously stored avatar.</summary>
+    /// <summary>Visual / behavioural evidence matched a previously stored capture.</summary>
     VisualMatch,
+    /// <summary>
+    /// Several rows matched equally well (same nickname on another server, or two
+    /// characters sharing a look). Nothing is picked for the user; the UI must ask.
+    /// </summary>
+    Ambiguous,
     /// <summary>User typed the identity in by hand.</summary>
     Manual,
 }
@@ -105,6 +110,19 @@ public sealed class RecognitionResult
 
     public IdentitySource IdentitySource { get; set; }
     public List<string> Warnings { get; set; } = new();
+
+    /// <summary>
+    /// Contradictions between signals, e.g. "视觉匹配指向 A，但游戏ID 明确是 B".
+    /// The backend always resolves them in favour of the 游戏ID, so these are
+    /// shown for diagnosis rather than as errors.
+    /// </summary>
+    public List<string> Conflicts { get; set; } = new();
+
+    /// <summary>
+    /// Characters the matcher considered, best first. Populated when the evidence
+    /// did not single one out, so the user can choose instead of guessing.
+    /// </summary>
+    public List<IdentityCandidate> Candidates { get; set; } = new();
     public int ScreenshotCount { get; set; }
     public List<string> CacheHits { get; set; } = new();
 
@@ -134,6 +152,41 @@ public sealed class RecognitionResult
     /// can still be linked by what the character looks like.
     /// </summary>
     public AppearanceSignature? Appearance { get; set; }
+}
+
+/// <summary>One candidate the matcher considered for an unidentified capture.</summary>
+public sealed class IdentityCandidate
+{
+    public string CharacterId { get; set; } = string.Empty;
+    public string Nickname { get; set; } = string.Empty;
+    public string? GameId { get; set; }
+    public string? Server { get; set; }
+    public long? Level { get; set; }
+
+    /// <summary>Combined 0..1 score of every signal that voted for this row.</summary>
+    public double Confidence { get; set; }
+
+    /// <summary>Per-signal evidence, strongest first.</summary>
+    public List<MatchEvidence> Evidence { get; set; } = new();
+
+    /// <summary>"莫莫莫 · 包裹面板相似度 0.98；人物评分 20214 一致"</summary>
+    public string Describe()
+    {
+        var name = string.IsNullOrWhiteSpace(Nickname) ? CharacterId : Nickname;
+        var why = Evidence.Count == 0 ? "无依据" : string.Join("；", Evidence.Take(3).Select(e => e.Detail));
+        return $"{name}（{Confidence:P0}）{why}";
+    }
+}
+
+/// <summary>One signal that contributed to a candidate's score.</summary>
+public sealed class MatchEvidence
+{
+    /// <summary>gameId / characterScore / panelThumb / appearance / avatar / history / nickname.</summary>
+    public string Kind { get; set; } = string.Empty;
+
+    public double Strength { get; set; }
+    public double Contribution { get; set; }
+    public string Detail { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -218,8 +271,15 @@ public sealed class Snapshot
 public sealed class AssetPoint
 {
     public string Date { get; set; } = string.Empty;
-    public long Gold { get; set; }
-    public long Silver { get; set; }
+
+    /// <summary>
+    /// Day total, or <c>null</c> when no capture that day showed 金币.
+    /// Null is not zero: a 人物属性 screenshot renders no currency at all, and
+    /// treating that as 0 produced a fake "金币归零".
+    /// </summary>
+    public long? Gold { get; set; }
+
+    public long? Silver { get; set; }
 }
 
 /// <summary>Aggregate figures for the top of the 资产统计 page.</summary>

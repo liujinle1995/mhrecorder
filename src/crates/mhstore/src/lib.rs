@@ -44,7 +44,9 @@ pub const DB_FILE: &str = "mhrecorder.db";
 // 2: added character_fingerprints (visual identity for panels that render no
 //    游戏ID — the 包裹 screenshot). Additive: the table is created on open with
 //    IF NOT EXISTS, so existing databases pick it up without a data migration.
-const SCHEMA_VERSION: i64 = 2;
+// 3: added characters.avatar_thumb (16x16 grayscale of the portrait) so the
+//    matcher can compare faces. Added with ALTER TABLE on existing databases.
+const SCHEMA_VERSION: i64 = 3;
 
 /// A persisted character plus derived fields the UI needs.
 #[derive(Debug, Clone)]
@@ -117,6 +119,7 @@ impl Store {
                 identity_confidence REAL NOT NULL DEFAULT 0,
                 identity_confirmed  INTEGER NOT NULL DEFAULT 0,
                 avatar_path         TEXT,
+                avatar_thumb        TEXT,
                 latest_stats        TEXT NOT NULL DEFAULT '{}',
                 latest_currencies   TEXT NOT NULL DEFAULT '{}',
                 created_at          INTEGER NOT NULL,
@@ -171,11 +174,25 @@ impl Store {
                 updated_at   INTEGER NOT NULL
             );
 
+            -- 新库直接带上 avatar_thumb；老库由下面的 ensure_column 补。
             CREATE INDEX IF NOT EXISTS idx_characters_nickname ON characters(nickname);
             CREATE INDEX IF NOT EXISTS idx_characters_game_id  ON characters(game_id);
             CREATE INDEX IF NOT EXISTS idx_snapshots_char_time ON snapshots(character_id, recorded_at);
             "#,
         )?;
+
+        // 后加的列：老库没有就必须补，否则 SELECT 会直接报 no such column。
+        Self::ensure_column(&conn, "characters", "avatar_thumb", "TEXT")?;
+
+        // 游戏ID 的唯一性：作用域（全区唯一 / 服务器内唯一）尚未确认，所以做成
+        // "能加就加"——已有重复数据的老库不因此启动失败，冲突交给
+        // resolve_identity 的 Ambiguous 分支提示用户。
+        if let Err(e) = conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_characters_game_id_unique
+             ON characters(game_id) WHERE game_id IS NOT NULL AND game_id <> ''",
+        ) {
+            tracing::warn!("未能建立 game_id 唯一索引（库中可能已有重复）：{e}");
+        }
 
         conn.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?1)
@@ -183,6 +200,21 @@ impl Store {
             params![SCHEMA_VERSION.to_string()],
         )?;
 
+        Ok(())
+    }
+
+    /// Add `column` to `table` when a database created by an older build lacks
+    /// it. SQLite has no `ADD COLUMN IF NOT EXISTS`, so we ask table_info first.
+    fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(|row| row.ok())
+            .collect();
+        if !names.iter().any(|n| n == column) {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+            tracing::info!("migrated: added {table}.{column}");
+        }
         Ok(())
     }
 
@@ -351,7 +383,8 @@ impl Store {
                          latest_stats = CASE WHEN ?6 = '{}' THEN latest_stats ELSE ?6 END,
                          latest_currencies = CASE WHEN ?7 = '{}' THEN latest_currencies ELSE ?7 END,
                          updated_at = ?8,
-                         avatar_path = COALESCE(?10, avatar_path)
+                         avatar_path = COALESCE(?10, avatar_path),
+                         avatar_thumb = COALESCE(?11, avatar_thumb)
                      WHERE id = ?9",
                     params![
                         incoming_nickname,
@@ -367,6 +400,7 @@ impl Store {
                         // avatar_path column; COALESCE keeps the previous one
                         // when a later capture had no avatar.
                         result.avatar_png_base64,
+                        result.avatar_thumb,
                     ],
                 )?;
                 id
@@ -376,9 +410,9 @@ impl Store {
                 tx.execute(
                     "INSERT INTO characters
                      (id, nickname, game_id, level, school, server, identity_confidence,
-                      identity_confirmed, avatar_path, latest_stats, latest_currencies,
-                      created_at, updated_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,0,?12,?8,?9,?10,?11)",
+                      identity_confirmed, avatar_path, avatar_thumb, latest_stats,
+                      latest_currencies, created_at, updated_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,0,?12,?13,?8,?9,?10,?11)",
                     params![
                         id,
                         nickname,
@@ -392,6 +426,7 @@ impl Store {
                         now,
                         now,
                         result.avatar_png_base64,
+                        result.avatar_thumb,
                     ],
                 )?;
                 id
@@ -582,15 +617,16 @@ impl Store {
             .cloned()
             .collect();
 
-        // Percent change compares the newest day with the one before it.
+        // 环比只在两天都有该字段的有效记录时才有意义。
         let (gold_change, silver_change) = if recent.len() >= 2 {
             let last = &recent[recent.len() - 1];
             let prev = &recent[recent.len() - 2];
-            let pct = |now: i64, before: i64| -> Option<f64> {
-                if before == 0 {
-                    None
-                } else {
-                    Some(((now - before) as f64 / before as f64) * 100.0)
+            let pct = |now: Option<i64>, before: Option<i64>| -> Option<f64> {
+                match (now, before) {
+                    (Some(now), Some(before)) if before != 0 => {
+                        Some(((now - before) as f64 / before as f64) * 100.0)
+                    }
+                    _ => None,
                 }
             };
             (pct(last.gold, prev.gold), pct(last.silver, prev.silver))
@@ -610,8 +646,17 @@ impl Store {
         Ok(StatisticsPayload { summary, characters: bars, recent })
     }
 
-    /// Sum gold/silver for every day that has at least one snapshot, using the
-    /// latest snapshot for each character on that day.
+    /// Sum 金币/银币 per day, **taking each field's own last known value**.
+    ///
+    /// The old version took the newest snapshot of the day and read both
+    /// currencies out of it. But a 人物属性 capture records stats and no
+    /// currency at all, so its `{}` currencies were summed as 0/0 and a day
+    /// whose last capture was a portrait panel showed a fake "金币归零" even
+    /// though the bag had been photographed an hour earlier.
+    ///
+    /// Now each field is resolved independently to that character's last
+    /// capture **that actually carried it**, and a field nobody ever captured
+    /// that day stays `None` (the UI renders it as 未知, not 0).
     fn daily_totals(&self) -> Result<Vec<AssetPoint>> {
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let conn = conn.transaction()?;
@@ -623,8 +668,9 @@ impl Store {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
         })?;
 
-        // key: (YYYY-MM-DD, character_id) -> latest (ts, gold, silver)
-        let mut latest: std::collections::BTreeMap<(String, String), (i64, i64, i64)> =
+        // key: (day, character) -> (last known gold, last known silver)
+        type Field = Option<i64>;
+        let mut latest: std::collections::BTreeMap<(String, String), (Field, Field)> =
             std::collections::BTreeMap::new();
         for r in rows {
             let (char_id, ts, currency_json) = r?;
@@ -632,20 +678,27 @@ impl Store {
                 .map(|d| d.format("%Y-%m-%d").to_string())
                 .unwrap_or_else(|| "1970-01-01".to_string());
             let cur: Currencies = from_json(currency_json);
-            let gold = cur.gold.as_ref().map(|v| v.value).unwrap_or(0);
-            let silver = cur.silver.as_ref().map(|v| v.value).unwrap_or(0);
-            let entry = latest.entry((day, char_id)).or_insert((ts, gold, silver));
-            if entry.0 <= ts {
-                *entry = (ts, gold, silver);
+            let entry = latest.entry((day, char_id)).or_default();
+            // ORDER BY recorded_at ASC ⇒ later rows overwrite; a snapshot that
+            // simply does not show a currency leaves the previous value alone.
+            if let Some(g) = cur.gold.as_ref().map(|v| v.value) {
+                entry.0 = Some(g);
+            }
+            if let Some(s) = cur.silver.as_ref().map(|v| v.value) {
+                entry.1 = Some(s);
             }
         }
 
-        let mut days: std::collections::BTreeMap<String, (i64, i64)> =
+        let mut days: std::collections::BTreeMap<String, (Field, Field)> =
             std::collections::BTreeMap::new();
-        for ((day, _char), (_ts, gold, silver)) in latest {
-            let e = days.entry(day).or_insert((0, 0));
-            e.0 += gold;
-            e.1 += silver;
+        for ((day, _char), (gold, silver)) in latest {
+            let e = days.entry(day).or_insert((None, None));
+            if let Some(g) = gold {
+                e.0 = Some(e.0.unwrap_or(0) + g);
+            }
+            if let Some(s) = silver {
+                e.1 = Some(e.1.unwrap_or(0) + s);
+            }
         }
 
         Ok(days
@@ -718,7 +771,8 @@ impl Store {
         // but no fingerprint yet (or the other way round) is still a candidate.
         let mut stmt = conn.prepare(
             "SELECT c.id, c.nickname, f.screen_kind, f.thumb, f.score,
-                    a.hair_name, a.hair_rgb, a.weapon_name, a.weapon_rgb
+                    a.hair_name, a.hair_rgb, a.weapon_name, a.weapon_rgb,
+                    c.game_id, c.server, c.level, c.avatar_thumb, c.updated_at
              FROM characters c
              LEFT JOIN character_fingerprints f ON f.character_id = c.id
              LEFT JOIN character_appearance a ON a.character_id = c.id
@@ -735,21 +789,33 @@ impl Store {
                 r.get::<_, Option<String>>(6)?,
                 r.get::<_, Option<String>>(7)?,
                 r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<i64>>(11)?,
+                r.get::<_, Option<String>>(12)?,
+                r.get::<_, i64>(13)?,
             ))
         })?;
 
         let mut refs: Vec<IdentityRef> = Vec::new();
         for row in rows {
-            let (id, nickname, kind, thumb, score, hair_name, hair_rgb, weapon_name, weapon_rgb) =
-                row?;
+            let (
+                id, nickname, kind, thumb, score, hair_name, hair_rgb, weapon_name, weapon_rgb,
+                game_id, server, level, avatar_thumb, updated_at,
+            ) = row?;
             let entry = match refs.iter_mut().find(|r| r.character_id == id) {
                 Some(e) => e,
                 None => {
                     refs.push(IdentityRef {
                         character_id: id.clone(),
                         nickname: nickname.clone(),
+                        game_id: game_id.clone(),
+                        server: server.clone(),
+                        level,
                         fingerprints: Vec::new(),
                         appearance: None,
+                        avatar_thumb: avatar_thumb.clone(),
+                        last_seen_at: Some(updated_at),
                     });
                     refs.last_mut().unwrap()
                 }
@@ -993,6 +1059,100 @@ mod tests {
             300,
             "latest currency is updated"
         );
+    }
+
+    /// 直接写快照，用来构造"同一天里先包裹后人物属性"这种时序。
+    fn seed_snapshot(
+        store: &Store,
+        character_id: &str,
+        when: &str,
+        gold: Option<i64>,
+        silver: Option<i64>,
+    ) {
+        let ts = chrono::DateTime::parse_from_rfc3339(when).unwrap().timestamp_millis();
+        let mut cur = Currencies::default();
+        if let Some(g) = gold {
+            cur.gold = Some(AttributeValue::new(g, 0.9, g.to_string()));
+        }
+        if let Some(s) = silver {
+            cur.silver = Some(AttributeValue::new(s, 0.9, s.to_string()));
+        }
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO snapshots
+             (id, character_id, recorded_at, stats, currencies, equipment, inventory,
+              confidence, source_screens)
+             VALUES (?1, ?2, ?3, '{}', ?4, '[]', '[]', 0.9, '[]')",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                character_id,
+                ts,
+                serde_json::to_string(&cur).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+
+    /// P0-5：当天最后一张是「人物属性」（不含金币）时，金币必须沿用当天最后一次
+    /// **有效**记录，而不是被最新快照的空货币对象覆盖成 0。
+    #[test]
+    fn daily_totals_do_not_zero_a_field_missing_from_the_last_capture() {
+        let (mut store, _dir) = temp_store();
+        let id = store
+            .save_recognition(&sample_result("海淘淘", "1", 0, 0), &[])
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute("DELETE FROM snapshots", []).unwrap();
+        }
+        seed_snapshot(&store, &id, "2026-10-01T10:00:00Z", Some(2_600_000), Some(100));
+        // 11:00 的人物属性截图：只有属性，没有金币银币
+        seed_snapshot(&store, &id, "2026-10-01T11:00:00Z", None, None);
+
+        let stats = store.statistics(5).unwrap();
+        let day = stats.recent.last().expect("one day");
+        assert_eq!(day.date, "2026-10-01");
+        assert_eq!(day.gold, Some(2_600_000), "金币不能被空快照抹成 0");
+        assert_eq!(day.silver, Some(100));
+    }
+
+    /// 每个字段各自取最后一次有效值：11 点只补了银币，金币应保留 10 点的。
+    #[test]
+    fn daily_totals_merge_fields_independently() {
+        let (mut store, _dir) = temp_store();
+        let id = store
+            .save_recognition(&sample_result("海淘淘", "1", 0, 0), &[])
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute("DELETE FROM snapshots", []).unwrap();
+        }
+        seed_snapshot(&store, &id, "2026-10-01T09:00:00Z", Some(1000), None);
+        seed_snapshot(&store, &id, "2026-10-01T10:00:00Z", None, Some(77));
+
+        let stats = store.statistics(5).unwrap();
+        let day = stats.recent.last().unwrap();
+        assert_eq!(day.gold, Some(1000));
+        assert_eq!(day.silver, Some(77));
+    }
+
+    /// 当天从来没有出现过金币 → 未知（None），不是 0。
+    #[test]
+    fn a_field_never_captured_stays_unknown() {
+        let (mut store, _dir) = temp_store();
+        let id = store
+            .save_recognition(&sample_result("海淘淘", "1", 0, 0), &[])
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute("DELETE FROM snapshots", []).unwrap();
+        }
+        seed_snapshot(&store, &id, "2026-10-01T10:00:00Z", None, Some(50));
+
+        let stats = store.statistics(5).unwrap();
+        let day = stats.recent.last().unwrap();
+        assert_eq!(day.gold, None, "从未采集到的字段必须是未知");
+        assert_eq!(day.silver, Some(50));
     }
 
     #[test]

@@ -10,7 +10,7 @@ public static class ProtocolConstants
 {
     public const string PipeName = "mhrecorder.v1";
     public const int Version = 1;
-    public const string AppVersion = "0.9.9";
+    public const string AppVersion = "0.10.0";
 }
 
 /// <summary>Canonical method names (mirror of `protocol::method`).</summary>

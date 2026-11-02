@@ -8,8 +8,9 @@
 //! compile against. Implementations may change freely; signatures may not.
 
 use mhcore::{
-    AttributeValue, Character, CombatStats, Currencies, EquipmentItem, IdentityRef,
-    IdentitySource, InventoryItem, PanelFingerprint, RecognitionResult, ScreenKind,
+    AttributeValue, Character, CombatStats, Currencies, EquipmentItem, EvidenceKind, IdentityCandidate,
+    IdentityRef, IdentitySource, InventoryItem, MatchEvidence, PanelFingerprint, RecognitionResult,
+    ScreenKind,
 };
 use opencv::prelude::*;
 use std::path::Path;
@@ -625,165 +626,400 @@ pub fn thumb_similarity(a: &[u8], b: &[u8]) -> f64 {
     (dot / (na.sqrt() * nb.sqrt())).clamp(0.0, 1.0)
 }
 
-/// Minimum thumbnail similarity for "this is the same panel".
+/// Thresholds and weights for turning several weak signals into one decision.
 ///
-/// Calibrated on real captures: the same 包裹 re-captured after a small window
-/// shift and brightness change scores 0.98; two characters' 人物属性 panels
-/// (same layout, different portrait and numbers) score 0.82; a 包裹 against a
-/// 人物属性 scores 0.48.
-const VISUAL_MATCH_MIN: f64 = 0.94;
+/// These numbers are **heuristics fitted on a few dozen real captures** of one
+/// game at one UI scale — not universal constants. They live in a struct so
+/// they can be re-fitted (or shadowed per-call in tests) in one place, and so
+/// the reasoning is visible instead of hidden in scattered `if x > 0.94`.
+///
+/// | 信号 | 权重 | 能否单独定案 |
+/// |---|---|---|
+/// | 面板缩略图 | 0.55 | 强度 ≥ 0.90（≈ 相似度 0.98）时可以 |
+/// | 人物评分   | 0.40 | **不能** —— 随装备/等级变化 |
+/// | 发色/武器  | 0.35 | 强度 ≥ 0.85 时可以 |
+/// | 头像       | 0.25 | 强度 ≥ 0.95 时可以 |
+/// | 时间上下文 | 0.10 | 不能 |
+///
+/// 权重之和刻意大于 1：互相印证的信号能越过判定线，孤立信号停在线上。
+#[derive(Debug, Clone)]
+pub struct MatchPolicy {
+    pub panel_weight: f64,
+    pub score_weight: f64,
+    pub appearance_weight: f64,
+    pub avatar_weight: f64,
+    pub history_weight: f64,
+    /// 低于此相似度的两张缩略图不是同一张图（包裹 vs 人物属性 ≈ 0.48，
+    /// 不同角色的同版式面板 ≈ 0.82，同一面板重拍 ≈ 0.98）。
+    pub panel_floor: f64,
+    /// 发色距离超过此值视为明显不是同一个人。
+    pub hair_gate: f64,
+    /// 发色距离在此以内算"同一个颜色"，而不是"同一个色系".
+    pub hair_close: f64,
+    /// 武器高光色距离超过此值视为换了武器（阻尼而非否决）。
+    pub weapon_gate: f64,
+    /// 通过所需的最低总分。
+    pub min_total: f64,
+    /// 与第二名的必备差距，避免"看起来都差不多"时瞎猜。
+    pub min_margin: f64,
+    /// 各信号可以单独定案的强度线。
+    pub decisive_panel: f64,
+    pub decisive_appearance: f64,
+    pub decisive_avatar: f64,
+    /// 上下文证据：此窗口内算"刚刚采集过".
+    pub recent_hours: f64,
+    /// 超过此天数不再给上下文加分。
+    pub stale_days: f64,
+}
 
-/// How far ahead of the runner-up the best candidate must be. Two characters
-/// whose panels look alike must not be guessed at.
-const VISUAL_MATCH_MARGIN: f64 = 0.03;
+impl Default for MatchPolicy {
+    fn default() -> Self {
+        Self {
+            panel_weight: 0.55,
+            score_weight: 0.40,
+            appearance_weight: 0.35,
+            avatar_weight: 0.25,
+            history_weight: 0.10,
+            panel_floor: 0.80,
+            // 同一角色跨面板实测 32，不同角色 45——所以 70 只拦"明显不是一个人"，
+            // 真正的区分交给武器色与加权。
+            hair_gate: 70.0,
+            hair_close: 40.0,
+            // 换武器的代价比换发型小得多，门槛放得比发色宽。
+            weapon_gate: 80.0,
+            min_total: 0.45,
+            min_margin: 0.08,
+            decisive_panel: 0.90,
+            decisive_appearance: 0.55,
+            decisive_avatar: 0.95,
+            recent_hours: 24.0,
+            stale_days: 30.0,
+        }
+    }
+}
 
-/// Link an unidentified capture to a character using stored fingerprints.
+/// Outcome of weighing every stored character against one capture.
+#[derive(Debug, Clone, Default)]
+pub struct VisualAssociation {
+    /// `Some` only when the evidence clearly singles one character out.
+    pub character_id: Option<String>,
+    pub confidence: f64,
+    /// Why that character won, strongest evidence first.
+    pub evidence: Vec<MatchEvidence>,
+    /// Ranked candidates, best first. Populated even when nothing was picked,
+    /// so the UI can offer a choice instead of a blank.
+    pub candidates: Vec<IdentityCandidate>,
+}
+
+struct Scored<'a> {
+    reference: &'a IdentityRef,
+    total: f64,
+    evidence: Vec<MatchEvidence>,
+    decisive: bool,
+}
+
+fn panel_label(kind: ScreenKind) -> &'static str {
+    match kind {
+        ScreenKind::Inventory => "包裹",
+        ScreenKind::CharacterAttributes => "人物属性",
+        ScreenKind::Unknown => "面板",
+    }
+}
+
+/// Weigh one stored character against the current capture.
 ///
-/// Three independent signals, most reliable first:
-///
-///  1. **人物评分** — printed on the 包裹 panel, unique per character, exact.
-///     Survives items changing, which is what breaks the thumbnails.
-///  2. **thumbnail** — the same panel captured again, with a required margin
-///     over the runner-up so a near-tie is reported as "don't know" rather
-///     than as a wrong character.
-///  3. **发色 / 武器** — the only signal left once the items changed *and* the
-///     panel kind changed, because it describes the character rather than the
-///     picture. Weaker than the other two, so it is tried last and still has to
-///     be unambiguous.
-fn associate_by_visual(
-    current: &[PanelFingerprint],
-    refs: &[IdentityRef],
+/// Every signal contributes `strength * weight`; nothing vetoes the candidate
+/// outright except "obviously different hair", because a changed weapon or a
+/// re-shot panel is normal and should lower the score rather than rule someone
+/// out.
+fn score_candidate(
+    reference: &IdentityRef,
+    decoded: &[(ScreenKind, Vec<u8>)],
+    current_scores: &[i64],
     appearance: Option<&mhcore::AppearanceSignature>,
-) -> Option<(String, f64, String)> {
-    if refs.is_empty() {
-        return None;
+    avatar_thumb: Option<&[u8]>,
+    now_ms: i64,
+    policy: &MatchPolicy,
+) -> (f64, Vec<MatchEvidence>, bool) {
+    use base64::Engine as _;
+    let mut evidence: Vec<MatchEvidence> = Vec::new();
+
+    // ---- 1. same panel picture ------------------------------------------
+    let mut best_sim = 0.0f64;
+    let mut best_kind = ScreenKind::Unknown;
+    for (kind, cur) in decoded {
+        for stored in &reference.fingerprints {
+            if stored.screen != *kind {
+                continue;
+            }
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&stored.thumb) else {
+                continue;
+            };
+            let sim = thumb_similarity(cur, &bytes);
+            if sim > best_sim {
+                best_sim = sim;
+                best_kind = *kind;
+            }
+        }
+    }
+    if best_sim >= policy.panel_floor {
+        let strength = ((best_sim - policy.panel_floor) / (1.0 - policy.panel_floor)).clamp(0.0, 1.0);
+        evidence.push(MatchEvidence::new(
+            EvidenceKind::PanelThumb,
+            strength,
+            strength * policy.panel_weight,
+            format!("{}面板相似度 {:.2}", panel_label(best_kind), best_sim),
+        ));
     }
 
-    // ---- 1. exact 人物评分 ------------------------------------------------
-    let score = current.iter().find_map(|f| f.score);
-    if let Some(score) = score {
-        let hits: Vec<&IdentityRef> = refs
-            .iter()
-            .filter(|r| r.fingerprints.iter().any(|f| f.score == Some(score)))
-            .collect();
-        if hits.len() == 1 {
-            return Some((
-                hits[0].character_id.clone(),
-                0.93,
-                format!("人物评分 {score} 与「{}」一致", hits[0].nickname),
+    // ---- 2. 人物评分 (auxiliary: it moves with gear) ---------------------
+    if let Some(score) = current_scores
+        .iter()
+        .copied()
+        .find(|s| reference.fingerprints.iter().any(|f| f.score == Some(*s)))
+    {
+        evidence.push(MatchEvidence::new(
+            EvidenceKind::CharacterScore,
+            1.0,
+            policy.score_weight,
+            format!("人物评分 {score} 一致"),
+        ));
+    }
+
+    // ---- 3. 发色 / 武器 --------------------------------------------------
+    if let (Some(cur), Some(stored)) = (appearance, reference.appearance.as_ref()) {
+        if let Some((strength, detail)) = appearance_strength(cur, stored, policy) {
+            evidence.push(MatchEvidence::new(
+                EvidenceKind::Appearance,
+                strength,
+                strength * policy.appearance_weight,
+                detail,
             ));
         }
     }
 
-    // ---- 2. panel thumbnail similarity -----------------------------------
+    // ---- 4. 头像 ---------------------------------------------------------
+    if let (Some(cur), Some(stored_b64)) = (avatar_thumb, reference.avatar_thumb.as_ref()) {
+        if let Ok(stored) = base64::engine::general_purpose::STANDARD.decode(stored_b64) {
+            if !cur.is_empty() && stored.len() == cur.len() {
+                let sim = thumb_similarity(cur, &stored);
+                if sim >= policy.panel_floor {
+                    let strength =
+                        ((sim - policy.panel_floor) / (1.0 - policy.panel_floor)).clamp(0.0, 1.0);
+                    evidence.push(MatchEvidence::new(
+                        EvidenceKind::Avatar,
+                        strength,
+                        strength * policy.avatar_weight,
+                        format!("头像相似度 {:.2}", sim),
+                    ));
+                }
+            }
+        }
+    }
+
+    // ---- 5. context: seen recently ---------------------------------------
+    if let Some(last) = reference.last_seen_at {
+        let hours = (now_ms - last).max(0) as f64 / 3_600_000.0;
+        let horizon = policy.stale_days * 24.0;
+        if hours <= horizon {
+            let strength = if hours <= policy.recent_hours {
+                1.0
+            } else {
+                let span = (horizon - policy.recent_hours).max(1.0);
+                (1.0 - (hours - policy.recent_hours) / span).clamp(0.0, 1.0)
+            };
+            let detail = if hours <= policy.recent_hours {
+                "最近采集过".to_string()
+            } else {
+                format!("{:.0} 天前采集过", (hours / 24.0).ceil())
+            };
+            evidence.push(MatchEvidence::new(
+                EvidenceKind::History,
+                strength,
+                strength * policy.history_weight,
+                detail,
+            ));
+        }
+    }
+
+    evidence.sort_by(|a, b| {
+        b.contribution
+            .partial_cmp(&a.contribution)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let total = evidence
+        .iter()
+        .map(|e| e.contribution)
+        .sum::<f64>()
+        .clamp(0.0, 1.0);
+    let decisive = evidence.iter().any(|e| match e.kind {
+        EvidenceKind::PanelThumb => e.strength >= policy.decisive_panel,
+        EvidenceKind::Appearance => e.strength >= policy.decisive_appearance,
+        EvidenceKind::Avatar => e.strength >= policy.decisive_avatar,
+        _ => false,
+    });
+    (total, evidence, decisive)
+}
+
+/// What the pipeline does with the visual evidence.
+#[derive(Debug, Clone, PartialEq)]
+enum IdentityDecision {
+    /// 面板身份字段与视觉指向不同的人：只记录，**不覆盖**。
+    Conflict(String),
+    /// 面板没报身份，视觉证据定案。
+    Adopt { character_id: String, confidence: f64 },
+    /// 没有定论，交回用户。
+    Unresolved,
+}
+
+/// 冲突保护：面板上写着的身份永远优先于视觉推断。
+///
+/// 这里刻意没有"视觉置信度高就覆盖"的分支——游戏ID 是唯一权威标识，让视觉
+/// 覆盖它就是过拟合风险的来源：换发色、换时装、换坐骑都会让缩略图漂移，
+/// 而游戏ID 不会。
+fn decide_identity(
+    resolved: Option<&str>,
+    names_itself: bool,
+    source: IdentitySource,
+    assoc: &VisualAssociation,
+    label: &dyn Fn(&str) -> String,
+) -> IdentityDecision {
+    match (resolved, assoc.character_id.as_deref()) {
+        (Some(chosen), Some(visual)) if chosen != visual => {
+            let key = match source {
+                IdentitySource::IdField => "游戏ID",
+                IdentitySource::Nickname => "昵称",
+                _ => "面板身份",
+            };
+            IdentityDecision::Conflict(format!(
+                "视觉匹配指向「{}」，但{key}明确是「{}」，已以{key}为准",
+                label(visual),
+                label(chosen)
+            ))
+        }
+        (Some(_), _) => IdentityDecision::Unresolved,
+        (None, Some(visual)) if !names_itself => IdentityDecision::Adopt {
+            character_id: visual.to_string(),
+            confidence: assoc.confidence,
+        },
+        // 面板自己报了身份（新角色），视觉结果不该接管：那正是
+        // "把已有角色改名成新截图的名字" 的老 bug。
+        (None, Some(_)) => IdentityDecision::Unresolved,
+        (None, None) => IdentityDecision::Unresolved,
+    }
+}
+
+/// Link an unidentified capture to a character by weighing every signal.
+///
+/// Replaces the old chain of hard thresholds (`if sim >= 0.94 …`) which had
+/// three failure modes: a bag whose items changed scored just under the line,
+/// 人物评分 was trusted as if it were an identity key, and nothing combined.
+///
+/// Rules:
+///  * one signal alone may decide only when it is decisive (see [`MatchPolicy`]);
+///  * otherwise at least two signals must agree, and the winner must beat the
+///    runner-up by `min_margin`;
+///  * a candidate is only rejected outright for clearly different hair — a
+///    swapped weapon, a restyled panel or a new dye all just lower the score.
+///
+/// Returns ranked candidates even when nothing is conclusive, so the caller can
+/// ask the user instead of silently creating a duplicate character.
+pub fn associate_by_evidence(
+    current: &[PanelFingerprint],
+    refs: &[IdentityRef],
+    appearance: Option<&mhcore::AppearanceSignature>,
+    avatar_thumb: Option<&str>,
+    now_ms: i64,
+    policy: &MatchPolicy,
+) -> VisualAssociation {
     use base64::Engine as _;
-    let decoded: Vec<(&PanelFingerprint, Vec<u8>)> = current
+    if refs.is_empty() {
+        return VisualAssociation::default();
+    }
+
+    let decoded: Vec<(ScreenKind, Vec<u8>)> = current
         .iter()
         .filter_map(|f| {
             base64::engine::general_purpose::STANDARD
                 .decode(&f.thumb)
                 .ok()
-                .map(|b| (f, b))
+                .map(|b| (f.screen, b))
+        })
+        .collect();
+    let current_scores: Vec<i64> = current.iter().filter_map(|f| f.score).collect();
+    let avatar = avatar_thumb.and_then(|t| base64::engine::general_purpose::STANDARD.decode(t).ok());
+
+    let mut scored: Vec<Scored> = refs
+        .iter()
+        .filter_map(|r| {
+            let (total, evidence, decisive) = score_candidate(
+                r,
+                &decoded,
+                &current_scores,
+                appearance,
+                avatar.as_deref(),
+                now_ms,
+                policy,
+            );
+            if evidence.is_empty() {
+                None
+            } else {
+                Some(Scored { reference: r, total, evidence, decisive })
+            }
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.total
+            .partial_cmp(&a.total)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let candidates: Vec<IdentityCandidate> = scored
+        .iter()
+        .take(3)
+        .map(|s| IdentityCandidate {
+            character_id: s.reference.character_id.clone(),
+            nickname: s.reference.nickname.clone(),
+            game_id: s.reference.game_id.clone(),
+            server: s.reference.server.clone(),
+            level: s.reference.level,
+            confidence: round2(s.total),
+            evidence: s.evidence.clone(),
         })
         .collect();
 
-    if !decoded.is_empty() {
-        let mut ranked: Vec<(f64, &IdentityRef, ScreenKind)> = Vec::new();
-        for r in refs {
-            let mut best = 0.0f64;
-            let mut best_kind = ScreenKind::Unknown;
-            for (cur, cur_thumb) in &decoded {
-                for stored in &r.fingerprints {
-                    if stored.screen != cur.screen {
-                        continue;
-                    }
-                    let Ok(stored_thumb) =
-                        base64::engine::general_purpose::STANDARD.decode(&stored.thumb)
-                    else {
-                        continue;
-                    };
-                    let sim = thumb_similarity(cur_thumb, &stored_thumb);
-                    if sim > best {
-                        best = sim;
-                        best_kind = cur.screen;
-                    }
-                }
-            }
-            if best > 0.0 {
-                ranked.push((best, r, best_kind));
-            }
-        }
-        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        if let Some((best, r, kind)) = ranked.first() {
-            let runner_up = ranked.get(1).map(|x| x.0).unwrap_or(0.0);
-            if *best >= VISUAL_MATCH_MIN && *best - runner_up >= VISUAL_MATCH_MARGIN {
-                let confidence = (0.80 + (*best - VISUAL_MATCH_MIN) * 3.0).clamp(0.80, 0.95);
-                let panel = match kind {
-                    ScreenKind::Inventory => "包裹",
-                    ScreenKind::CharacterAttributes => "人物属性",
-                    ScreenKind::Unknown => "面板",
-                };
-                return Some((
-                    r.character_id.clone(),
-                    confidence,
-                    format!(
-                        "画面与「{}」此前录入的{}截图一致（{:.0}%）",
-                        r.nickname,
-                        panel,
-                        best * 100.0
-                    ),
-                ));
-            }
-        }
-    }
-
-    // ---- 3. 发色 / 武器 ---------------------------------------------------
-    // The picture itself is no longer recognisable (items changed, or this is
-    // the other panel kind), but the character still looks the same. Only
-    // accept a single unambiguous candidate: two characters can share a hair
-    // colour, and guessing between them is worse than asking.
-    let current_appearance = appearance?;
-
-    // A character whose look was never recorded could be the real owner, and we
-    // would have no way of telling. Stay out of the way and let the user choose
-    // rather than attributing one character's bag to another.
-    if refs.iter().any(|r| r.appearance.is_none()) {
-        return None;
-    }
-
-    let mut hits: Vec<(f64, &IdentityRef, &mhcore::AppearanceSignature)> = Vec::new();
-    for r in refs {
-        let Some(stored) = r.appearance.as_ref() else {
-            continue;
-        };
-        if let Some(conf) = appearance_confidence(current_appearance, stored) {
-            hits.push((conf, r, stored));
-        }
-    }
-    if hits.len() != 1 {
-        return None;
-    }
-
-    let (conf, r, stored) = hits.pop()?;
-    // Name both readings: they can land in adjacent palette buckets while still
-    // being the same head of hair (the comparison runs on the raw colour).
-    let mut evidence = if stored.hair_name == current_appearance.hair_name {
-        format!(
-            "发色 {} 与「{}」一致",
-            current_appearance.hair_name, r.nickname
-        )
-    } else {
-        format!(
-            "发色与「{}」记录的 {} 相近（本次 {}）",
-            r.nickname, stored.hair_name, current_appearance.hair_name
-        )
+    let Some(best) = scored.first() else {
+        return VisualAssociation { candidates, ..Default::default() };
     };
-    if let (Some(w), Some(sw)) = (&current_appearance.weapon_name, &stored.weapon_name) {
-        let shown = if w == sw { w.clone() } else { sw.clone() };
-        evidence.push_str(&format!("，武器同为{}", shown));
+    let runner_up = scored.get(1).map(|s| s.total).unwrap_or(0.0);
+    let agreeing = best.evidence.iter().filter(|e| e.strength >= 0.5).count();
+    // A character whose look was never recorded could be the real owner, and an
+    // appearance-only decision could not rule them out. Stay out of the way.
+    let appearance_only = best
+        .evidence
+        .iter()
+        .all(|e| matches!(e.kind, EvidenceKind::Appearance | EvidenceKind::History));
+    let look_unknown = refs.iter().any(|r| r.appearance.is_none());
+    // 两种定案方式：一个信号本身就足够决定性（相似度 0.98 的面板、完全一致的
+    // 发色武器），或者两个以上信号互相印证并越过总分线。评分单独永远不够。
+    let conclusive = best.total - runner_up >= policy.min_margin
+        && !(appearance_only && look_unknown)
+        && ((best.total >= policy.min_total && agreeing >= 2) || best.decisive);
+
+    VisualAssociation {
+        character_id: if conclusive {
+            Some(best.reference.character_id.clone())
+        } else {
+            None
+        },
+        confidence: round2(best.total),
+        evidence: best.evidence.clone(),
+        candidates,
     }
-    Some((r.character_id.clone(), conf, evidence))
+}
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
 }
 
 // ---------------------------------------------------------------------------
@@ -987,45 +1223,57 @@ pub fn appearance_for_capture(
     appearance_signature(work, kind)
 }
 
-/// How well a stored signature explains the current capture, if at all.
+/// How well a stored signature explains the current capture, 0.0..=1.0.
 ///
-/// 发色 must agree within [`HAIR_MATCH_MAX`]; when both captures also show a
-/// weapon glow it must agree too, which is what stops two dark-haired
-/// characters from collapsing into one.
-fn appearance_confidence(
+/// Graded rather than pass/fail: the game lets a character re-dye their hair,
+/// swap weapons and change outfits, so "发色 slightly different" must lower the
+/// score instead of ruling the character out. Only a clearly different head of
+/// hair rejects outright; a different weapon only dampens, because weapon swaps
+/// are the commoner change.
+fn appearance_strength(
     current: &mhcore::AppearanceSignature,
     stored: &mhcore::AppearanceSignature,
-) -> Option<f64> {
+    policy: &MatchPolicy,
+) -> Option<(f64, String)> {
     let d = rgb_distance(current.hair_rgb, stored.hair_rgb);
-    if d > HAIR_MATCH_MAX {
+    if d >= policy.hair_gate {
         return None;
     }
-
-    let mut conf: f64 = if d <= HAIR_MATCH_CLOSE { 0.82 } else { 0.76 };
+    let hair = (1.0 - d / policy.hair_gate).clamp(0.0, 1.0);
+    let mut strength = hair;
+    let mut detail = if stored.hair_name == current.hair_name {
+        format!("发色 {} 一致", current.hair_name)
+    } else if d <= policy.hair_close {
+        format!("发色与记录的 {} 相近", stored.hair_name)
+    } else {
+        format!("发色与记录的 {} 有差异（本次 {}）", stored.hair_name, current.hair_name)
+    };
 
     if let (Some(a), Some(b)) = (current.weapon_rgb, stored.weapon_rgb) {
-        if rgb_distance(a, b) > WEAPON_MATCH_MAX {
-            return None;
+        let dw = rgb_distance(a, b);
+        if dw >= policy.weapon_gate {
+            // 换武器不否决，但要显著压低——否则两个发色相近的角色分不开。
+            strength *= 0.3;
+            detail.push_str("，武器不同");
+        } else {
+            let w = 1.0 - dw / policy.weapon_gate;
+            strength = (strength * 0.6 + w * 0.4).clamp(0.0, 1.0);
+            let same = dw <= 30.0;
+            detail.push_str(&format!(
+                "，武器{}",
+                if same {
+                    "同为同一色".to_string()
+                } else {
+                    format!("颜色相近（距离 {dw:.0}）")
+                }
+            ));
         }
-        conf += 0.05;
     }
-    Some(conf.min(0.88))
+    Some((strength, detail))
 }
 
-/// Same 发色 within this distance is the same head of hair.
-///
-/// Calibrated on the real captures: the same character's 人物属性 portrait and
-/// mounted 包裹 model measure 32 apart, while a different character measured 45
-/// — so the gate cannot be the whole story (see [`WEAPON_MATCH_MAX`]); it only
-/// has to keep obviously different hair out.
-const HAIR_MATCH_MAX: f64 = 50.0;
-
-/// Below this the hair is not just the same bucket, it is the same colour.
-const HAIR_MATCH_CLOSE: f64 = 25.0;
-
-/// Same-kind 武器 accents must be at least this close, otherwise the two
-/// captures are of different characters.
-const WEAPON_MATCH_MAX: f64 = 70.0;
+/// Legacy single-threshold constants were replaced by [`MatchPolicy`], which
+/// keeps the same idea but as named, tunable weights instead of magic numbers.
 
 /// Extract a sub-image, clamped to the source bounds.
 fn crop_rgba(
@@ -1659,7 +1907,7 @@ fn strip_label<'a>(text: &'a str, _label: &str) -> &'a str {
 /// We therefore seed a square from the ID box, then verify it really looks like
 /// a portrait (high colour variance inside, low variance on the border ring).
 /// If the check fails we return `None` rather than shipping a wrong crop.
-fn crop_avatar_png(img: &image::RgbaImage, lines: &[OcrLine]) -> Option<String> {
+fn crop_avatar(img: &image::RgbaImage, lines: &[OcrLine]) -> Option<image::RgbaImage> {
     let (w, h) = (img.width() as i32, img.height() as i32);
 
     // Anchor: the "ID" token (or the line that carries the numeric game id).
@@ -1748,8 +1996,13 @@ fn crop_avatar_png(img: &image::RgbaImage, lines: &[OcrLine]) -> Option<String> 
         return None;
     }
 
-    let cropped = image::imageops::crop_imm(img, ix as u32, iy as u32, is as u32, is as u32).to_image();
+    Some(image::imageops::crop_imm(img, ix as u32, iy as u32, is as u32, is as u32).to_image())
+}
 
+/// Crop the framed portrait out of a 人物属性 panel and encode it as a PNG
+/// data URL for the UI.
+fn crop_avatar_png(img: &image::RgbaImage, lines: &[OcrLine]) -> Option<String> {
+    let cropped = crop_avatar(img, lines)?;
     // Encode as PNG and base64 so the UI can turn it straight into a data URL.
     let mut png_bytes = Vec::new();
     {
@@ -1760,6 +2013,29 @@ fn crop_avatar_png(img: &image::RgbaImage, lines: &[OcrLine]) -> Option<String> 
     }
     use base64::Engine as _;
     Some(base64::engine::general_purpose::STANDARD.encode(&png_bytes))
+}
+
+/// 16x16 grayscale of the cropped portrait, used as a face fingerprint.
+///
+/// Colour is dropped on purpose: the game re-tints portraits with lighting and
+/// equipment glow, while the *shape* of the face stays put. 256 bytes is small
+/// enough to keep in the characters table and compare on every recognition.
+fn crop_avatar_thumb(img: &image::RgbaImage, lines: &[OcrLine]) -> Option<String> {
+    let cropped = crop_avatar(img, lines)?;
+    let small = image::imageops::resize(
+        &cropped,
+        16,
+        16,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut out = Vec::with_capacity(16 * 16);
+    for p in small.pixels() {
+        // Rec. 601 luma, same weighting the panel thumbnails use.
+        let v = 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
+        out.push(v.clamp(0.0, 255.0) as u8);
+    }
+    use base64::Engine as _;
+    Some(base64::engine::general_purpose::STANDARD.encode(&out))
 }
 
 /// Heuristic confidence check for a candidate avatar crop.
@@ -2314,26 +2590,149 @@ fn extract_equipment(lines: &[OcrLine]) -> Vec<EquipmentItem> {
     out
 }
 
-/// Resolve which known character this recognition belongs to.
-fn associate_identity(
+/// Identity resolved from what the panel says about itself.
+struct IdentityResolution {
+    character_id: Option<String>,
+    source: IdentitySource,
+    confidence: f64,
+    candidates: Vec<IdentityCandidate>,
+    /// Things the user should know, e.g. "两个角色同名" or "服务器对不上".
+    notes: Vec<String>,
+}
+
+fn character_candidate(c: &Character, confidence: f64, detail: String) -> IdentityCandidate {
+    IdentityCandidate {
+        character_id: c.id.clone(),
+        nickname: c.nickname.clone(),
+        game_id: c.game_id.clone(),
+        server: c.server.clone(),
+        level: c.level,
+        confidence,
+        evidence: vec![MatchEvidence::new(
+            EvidenceKind::Nickname,
+            1.0,
+            confidence,
+            detail,
+        )],
+    }
+}
+
+/// Who does this capture claim to be?
+///
+/// 游戏ID is the only authoritative key; everything else is a hint that may
+/// have to be confirmed by the user:
+///
+///  * 游戏ID 命中 → 直接认（0.98）。未命中说明是新角色，不拿别人的行顶上。
+///  * 昵称只在**唯一命中**时使用。游戏里不同服务器可以有同名角色，旧实现用
+///    `find()` 取第一个，两个区服的重名角色会被悄悄合并成一个。
+///  * 同名多于一个 → 返回候选列表、标记 `Ambiguous`，让用户选。
+///  * 服务器只用于在同名候选里筛，不反向否决唯一候选。
+fn resolve_identity(
     game_id: Option<&str>,
     nickname: Option<&str>,
+    server: Option<&str>,
     known: &[Character],
-) -> (Option<String>, IdentitySource, f64) {
-    if let Some(gid) = game_id {
-        if let Some(c) = known.iter().find(|c| c.game_id.as_deref() == Some(gid)) {
-            return (Some(c.id.clone()), IdentitySource::IdField, 0.98);
-        }
-        // A visible game id is strong evidence even for a brand new character.
-        return (None, IdentitySource::IdField, 0.95);
+) -> IdentityResolution {
+    let unresolved = |source: IdentitySource, confidence: f64, notes: Vec<String>| IdentityResolution {
+        character_id: None,
+        source,
+        confidence,
+        candidates: Vec::new(),
+        notes,
+    };
+
+    if let Some(gid) = game_id.filter(|s| !s.trim().is_empty()) {
+        let hits: Vec<&Character> = known
+            .iter()
+            .filter(|c| c.game_id.as_deref() == Some(gid))
+            .collect();
+        return match hits.len() {
+            1 => IdentityResolution {
+                character_id: Some(hits[0].id.clone()),
+                source: IdentitySource::IdField,
+                confidence: 0.98,
+                candidates: Vec::new(),
+                notes: Vec::new(),
+            },
+            // A visible id that matches nothing is still strong proof of a new
+            // character — but it is *not* an excuse to pick a look-alike row.
+            0 => unresolved(IdentitySource::IdField, 0.95, Vec::new()),
+            _ => IdentityResolution {
+                character_id: None,
+                source: IdentitySource::Ambiguous,
+                confidence: 0.5,
+                candidates: hits
+                    .iter()
+                    .map(|c| character_candidate(c, 0.5, format!("游戏ID {gid}")))
+                    .collect(),
+                notes: vec![format!(
+                    "游戏ID {gid} 在库中对应 {} 个角色，库数据可能重复，请在右侧手动确认",
+                    hits.len()
+                )],
+            },
+        };
     }
-    if let Some(nick) = nickname {
-        if let Some(c) = known.iter().find(|c| c.nickname == nick) {
-            return (Some(c.id.clone()), IdentitySource::Nickname, 0.85);
+
+    if let Some(nick) = nickname.filter(|s| !s.trim().is_empty()) {
+        let mut hits: Vec<&Character> = known.iter().filter(|c| c.nickname == nick).collect();
+        if !hits.is_empty() {
+            // 服务器只能帮忙缩小范围，不能反过来把唯一候选否掉。
+            if hits.len() > 1 {
+                if let Some(srv) = server.filter(|s| !s.is_empty()) {
+                    let narrowed: Vec<&Character> = hits
+                        .iter()
+                        .copied()
+                        .filter(|c| c.server.as_deref() == Some(srv))
+                        .collect();
+                    if !narrowed.is_empty() {
+                        hits = narrowed;
+                    }
+                }
+            }
+
+            if hits.len() == 1 {
+                let c = hits[0];
+                let mismatch = matches!(
+                    (server.filter(|s| !s.is_empty()), c.server.as_deref()),
+                    (Some(a), Some(b)) if a != b
+                );
+                return IdentityResolution {
+                    character_id: Some(c.id.clone()),
+                    source: IdentitySource::Nickname,
+                    confidence: if mismatch { 0.70 } else { 0.82 },
+                    candidates: Vec::new(),
+                    notes: if mismatch {
+                        vec![format!(
+                            "截图服务器「{}」与「{}」记录的「{}」不一致，已按昵称归属，请确认",
+                            server.unwrap_or(""),
+                            c.nickname,
+                            c.server.clone().unwrap_or_default()
+                        )]
+                    } else {
+                        Vec::new()
+                    },
+                };
+            }
+
+            return IdentityResolution {
+                character_id: None,
+                source: IdentitySource::Ambiguous,
+                confidence: 0.5,
+                candidates: hits
+                    .iter()
+                    .map(|c| character_candidate(c, 0.5, format!("同名「{nick}」")))
+                    .collect(),
+                notes: vec![format!(
+                    "库中有 {} 个角色都叫「{nick}」，无法凭昵称确定归属，请在右侧选择（游戏ID / 服务器可区分）",
+                    hits.len()
+                )],
+            };
         }
     }
-    (None, IdentitySource::VisualMatch, 0.6)
+
+    unresolved(IdentitySource::VisualMatch, 0.6, Vec::new())
 }
+
 
 // ---------------------------------------------------------------------------
 // Pipeline
@@ -2436,6 +2835,12 @@ impl RecognitionPipeline {
                     result.avatar_png_base64 = Some(png);
                 }
             }
+            // A 16x16 grayscale of the same portrait: the UI shows the PNG, the
+            // matcher compares the thumb. Colour is discarded so a change of
+            // dye or lighting does not make the same face score differently.
+            if result.avatar_thumb.is_none() {
+                result.avatar_thumb = crop_avatar_thumb(work, &lines);
+            }
 
             // 发色 / 武器 of the character on this panel. Recorded once per
             // batch — every screenshot in a batch is the same character, and a
@@ -2526,44 +2931,77 @@ impl RecognitionPipeline {
             );
         }
 
-        let (mut character_id, mut source, mut identity_conf) = associate_identity(
+        let resolution = resolve_identity(
             result.character.game_id.as_deref(),
             result.character.nickname.as_deref(),
+            result.character.server.as_deref(),
             known,
         );
+        let mut character_id = resolution.character_id;
+        let mut source = resolution.source;
+        let mut identity_conf = resolution.confidence;
+        result.candidates = resolution.candidates;
+        result.warnings.extend(resolution.notes);
 
         // Nothing on the panel identifies the character — but we may still know
         // whose picture this is. A 包裹 capture shows no 游戏ID, no nickname and
-        // no level; the fingerprint (and 人物评分 when present) is the only
-        // evidence there is.
+        // no level; the evidence below is all there is.
         //
-        // Only when the panel is silent, though: a 人物属性 capture that prints
-        // 游戏ID 429277361 while the database has no such row is a *new*
-        // character, not whichever existing one happens to share its hair
-        // colour. Letting the visual guess run there renamed an existing
-        // character on save.
+        // The evidence is evaluated even when the panel *did* name itself, so a
+        // visual model that has drifted shows up as a conflict instead of
+        // silently disagreeing with an authoritative 游戏ID.
         let names_itself =
             result.character.game_id.is_some() || result.character.nickname.is_some();
-        if character_id.is_none() && !names_itself {
-            if let Some((id, conf, evidence)) =
-                associate_by_visual(&result.fingerprints, refs, result.appearance.as_ref())
-            {
-                // Bring the character's name and level along so the result reads
-                // like a real record instead of "未命名角色". The 游戏ID is left
-                // alone on purpose: it is the authoritative key and must not be
-                // promoted from a visual guess.
-                if let Some(c) = known.iter().find(|c| c.id == id) {
-                    if result.character.nickname.is_none() {
-                        result.character.nickname = Some(c.nickname.clone());
+
+        if !refs.is_empty() {
+            let assoc = associate_by_evidence(
+                &result.fingerprints,
+                refs,
+                result.appearance.as_ref(),
+                result.avatar_thumb.as_deref(),
+                now_ms(),
+                &MatchPolicy::default(),
+            );
+
+            let label = |id: &str| -> String {
+                known
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.nickname.clone())
+                    .unwrap_or_else(|| id.to_string())
+            };
+
+            match decide_identity(character_id.as_deref(), names_itself, source, &assoc, &label) {
+                IdentityDecision::Conflict(note) => result.conflicts.push(note),
+                IdentityDecision::Adopt { character_id: id, confidence } => {
+                    // Bring the character's name and level along so the result
+                    // reads like a real record instead of "未命名角色". The
+                    // 游戏ID is left alone on purpose: it is the authoritative
+                    // key and must not be promoted from a visual guess.
+                    if let Some(c) = known.iter().find(|c| c.id == id) {
+                        if result.character.nickname.is_none() {
+                            result.character.nickname = Some(c.nickname.clone());
+                        }
+                        if result.character.level.is_none() {
+                            result.character.level = c.level;
+                        }
                     }
-                    if result.character.level.is_none() {
-                        result.character.level = c.level;
+                    character_id = Some(id);
+                    source = IdentitySource::VisualMatch;
+                    identity_conf = confidence.max(0.6);
+                    result.identity_evidence = Some(evidence_summary(&assoc.evidence));
+                }
+                IdentityDecision::Unresolved => {
+                    // 有候选但没有定论：把候选交给用户，不猜。
+                    if !assoc.candidates.is_empty() {
+                        result.candidates = assoc.candidates.clone();
+                        result.identity_evidence = Some(evidence_summary(&assoc.evidence));
+                        result.warnings.push(
+                            "证据不足以确定归属，请从右侧角色列表中确认（下方会显示候选及其依据）"
+                                .to_string(),
+                        );
                     }
                 }
-                character_id = Some(id);
-                source = IdentitySource::VisualMatch;
-                identity_conf = conf;
-                result.identity_evidence = Some(evidence);
             }
         }
 
@@ -2600,8 +3038,25 @@ impl RecognitionPipeline {
     }
 }
 
-fn merge_stats(dst: &mut CombatStats, src: &CombatStats) {
-    macro_rules! take {
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// "包裹面板相似度 0.98；人物评分 20214 一致" — shown next to the confidence so
+/// a wrong attribution can be traced to the signal that caused it.
+fn evidence_summary(evidence: &[MatchEvidence]) -> String {
+    evidence
+        .iter()
+        .take(3)
+        .map(|e| e.detail.clone())
+        .collect::<Vec<_>>()
+        .join("；")
+}
+
+fn merge_stats(dst: &mut CombatStats, src: &CombatStats) {    macro_rules! take {
         ($field:ident) => {
             if dst.$field.is_none() {
                 dst.$field = src.$field.clone();
@@ -2765,10 +3220,11 @@ mod tests {
             latest_stats: CombatStats::default(),
             latest_currencies: Currencies::default(),
         }];
-        let (id, src, conf) = associate_identity(Some("429277013"), Some("海淘淘"), &known);
-        assert_eq!(id.as_deref(), Some("abc"));
-        assert_eq!(src, IdentitySource::IdField);
-        assert!(conf > 0.9);
+        let r = resolve_identity(Some("429277013"), Some("海淘淘"), None, &known);
+        assert_eq!(r.character_id.as_deref(), Some("abc"));
+        assert_eq!(r.source, IdentitySource::IdField);
+        assert!(r.confidence > 0.9);
+        assert!(r.candidates.is_empty(), "决定性匹配不该再抛候选");
     }
 
     #[test]
@@ -2788,9 +3244,129 @@ mod tests {
             latest_stats: CombatStats::default(),
             latest_currencies: Currencies::default(),
         }];
-        let (id, src, _) = associate_identity(None, Some("云中鹤"), &known);
-        assert_eq!(id.as_deref(), Some("abc"));
-        assert_eq!(src, IdentitySource::Nickname);
+        let r = resolve_identity(None, Some("云中鹤"), None, &known);
+        assert_eq!(r.character_id.as_deref(), Some("abc"));
+        assert_eq!(r.source, IdentitySource::Nickname);
+    }
+
+    fn known_char(id: &str, nick: &str, game_id: Option<&str>, server: Option<&str>) -> Character {
+        Character {
+            id: id.into(),
+            nickname: nick.into(),
+            game_id: game_id.map(str::to_string),
+            level: None,
+            school: None,
+            server: server.map(str::to_string),
+            identity_confidence: 0.9,
+            identity_confirmed: false,
+            avatar_path: None,
+            created_at: 0,
+            updated_at: 0,
+            latest_stats: CombatStats::default(),
+            latest_currencies: Currencies::default(),
+        }
+    }
+
+    /// 同名不等于同一个人：不同服可以有同名角色。旧实现 `find()` 取第一个，
+    /// 两个区的角色会被悄悄合并。现在必须返回候选、标记 Ambiguous。
+    #[test]
+    fn duplicate_nicknames_are_ambiguous_not_guessed() {
+        let known = vec![
+            known_char("a", "云中鹤", None, Some("电信一区")),
+            known_char("b", "云中鹤", None, Some("电信二区")),
+        ];
+        let r = resolve_identity(None, Some("云中鹤"), None, &known);
+
+        assert!(r.character_id.is_none(), "同名多行时不得直接选一个");
+        assert_eq!(r.source, IdentitySource::Ambiguous);
+        assert_eq!(r.candidates.len(), 2, "两个候选都要给出来");
+        assert!(!r.notes.is_empty(), "要提示用户同名无法判定");
+    }
+
+    /// 服务器字段只能用来在同名里缩小范围，不能反过来否决唯一候选。
+    #[test]
+    fn server_narrows_duplicate_nicknames() {
+        let known = vec![
+            known_char("a", "云中鹤", None, Some("电信一区")),
+            known_char("b", "云中鹤", None, Some("电信二区")),
+        ];
+        let r = resolve_identity(None, Some("云中鹤"), Some("电信二区"), &known);
+        assert_eq!(r.character_id.as_deref(), Some("b"));
+        assert_eq!(r.source, IdentitySource::Nickname);
+    }
+
+    /// 游戏ID 命中时，昵称写错也不影响归属。
+    #[test]
+    fn game_id_beats_a_wrong_nickname() {
+        let known = vec![
+            known_char("a", "云中鹤", Some("100001"), None),
+            known_char("b", "云中鹤", Some("100002"), None),
+        ];
+        let r = resolve_identity(Some("100002"), Some("云中鹤"), None, &known);
+        assert_eq!(r.character_id.as_deref(), Some("b"));
+        assert_eq!(r.source, IdentitySource::IdField);
+    }
+
+    // ---- 冲突保护 ---------------------------------------------------------
+
+    fn assoc_of(id: &str, confidence: f64) -> VisualAssociation {
+        VisualAssociation {
+            character_id: Some(id.to_string()),
+            confidence,
+            evidence: Vec::new(),
+            candidates: Vec::new(),
+        }
+    }
+
+    /// 视觉说 A、游戏ID 说 B —— 必须以 B 为准，并留下一条冲突记录。
+    #[test]
+    fn visual_never_overrides_the_game_id() {
+        let label = |id: &str| format!("角色{id}");
+        let d = decide_identity(
+            Some("b"),
+            true,
+            IdentitySource::IdField,
+            &assoc_of("a", 0.99),
+            &label,
+        );
+        match d {
+            IdentityDecision::Conflict(note) => {
+                assert!(note.contains("游戏ID"), "note {note}");
+                assert!(note.contains("角色a") && note.contains("角色b"), "note {note}");
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+    }
+
+    /// 面板没报身份时，视觉证据可以定案。
+    #[test]
+    fn visual_decides_when_the_panel_is_silent() {
+        let label = |id: &str| format!("角色{id}");
+        let d = decide_identity(
+            None,
+            false,
+            IdentitySource::VisualMatch,
+            &assoc_of("a", 0.72),
+            &label,
+        );
+        assert_eq!(
+            d,
+            IdentityDecision::Adopt { character_id: "a".to_string(), confidence: 0.72 }
+        );
+    }
+
+    /// 面板自己报了身份（新角色）时，视觉结果不许接管。
+    #[test]
+    fn a_new_character_is_not_renamed_by_a_lookalike() {
+        let label = |id: &str| format!("角色{id}");
+        let d = decide_identity(
+            None,
+            true,
+            IdentitySource::IdField,
+            &assoc_of("a", 0.99),
+            &label,
+        );
+        assert_eq!(d, IdentityDecision::Unresolved);
     }
 
     #[test]
@@ -3050,16 +3626,42 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(panel_thumb(work))
     }
 
+    const NOW_MS: i64 = 1_700_000_000_000;
+
+    /// 旧接口形状的薄包装：测试里只关心"链到谁"，不关心证据结构。
+    fn visual(
+        current: &[PanelFingerprint],
+        refs: &[IdentityRef],
+        appearance: Option<&mhcore::AppearanceSignature>,
+    ) -> Option<(String, f64, String)> {
+        let assoc = associate_by_evidence(
+            current,
+            refs,
+            appearance,
+            None,
+            NOW_MS,
+            &MatchPolicy::default(),
+        );
+        assoc
+            .character_id
+            .map(|id| (id, assoc.confidence, evidence_summary(&assoc.evidence)))
+    }
+
     fn bag_ref(id: &str, nick: &str, thumb: String, score: Option<i64>) -> IdentityRef {
         IdentityRef {
             character_id: id.to_string(),
             nickname: nick.to_string(),
+            game_id: None,
+            server: None,
+            level: None,
             fingerprints: vec![PanelFingerprint {
                 screen: ScreenKind::Inventory,
                 thumb,
                 score,
             }],
             appearance: None,
+            avatar_thumb: None,
+            last_seen_at: None,
         }
     }
 
@@ -3080,21 +3682,53 @@ mod tests {
         }];
 
         let (id, confidence, evidence) =
-            associate_by_visual(&current, &refs, None).expect("the same panel must link");
+            visual(&current, &refs, None).expect("the same panel must link");
         assert_eq!(id, "c1");
-        assert!(confidence >= 0.80, "confidence {confidence}");
-        assert!(evidence.contains("莫莫莫"), "evidence {evidence}");
+        assert!(confidence >= 0.5, "confidence {confidence}");
+        assert!(evidence.contains("包裹"), "evidence {evidence}");
     }
 
-    /// 人物评分 is the exact key: it is printed on the 包裹 panel, is unique per
-    /// character, and survives the item grid changing (which is exactly what
-    /// breaks the thumbnails).
+    /// 人物评分 是辅助特征：它随装备、等级变化，所以单独一致**不得**定案，
+    /// 但足以把候选排到最前，让用户一眼看到"大概是这个角色"。
+    /// 纯色缩略图：任何两张之间的相似度都是 0，用来把"面板证据"彻底排除。
+    fn flat_thumb() -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(vec![128u8; 32 * 32])
+    }
+
     #[test]
-    fn score_match_links_and_explains_itself() {
+    fn score_alone_ranks_but_does_not_assign() {
+        let refs = vec![
+            bag_ref("c1", "莫莫莫", flat_thumb(), Some(20214)),
+            bag_ref("c2", "鱼鱼鱼", flat_thumb(), Some(30111)),
+        ];
+        // 面板证据为 0，只剩评分这条线索。
+        let current = vec![PanelFingerprint {
+            screen: ScreenKind::Inventory,
+            thumb: flat_thumb(),
+            score: Some(20214),
+        }];
+
+        let assoc = associate_by_evidence(
+            &current, &refs, None, None, NOW_MS, &MatchPolicy::default(),
+        );
+        assert!(assoc.character_id.is_none(), "单靠评分不得自动归属");
+        assert_eq!(assoc.candidates[0].character_id, "c1");
+        assert!(
+            assoc.candidates[0]
+                .evidence
+                .iter()
+                .any(|e| e.kind == EvidenceKind::CharacterScore),
+            "候选里要留下评分证据"
+        );
+    }
+
+    /// 面板 + 评分互相印证时就可以定案，而且两项证据都要被记下来。
+    #[test]
+    fn panel_plus_score_assigns_with_per_signal_evidence() {
         let bag = thumb_of("real_inventory.png");
         let refs = vec![
             bag_ref("c1", "莫莫莫", bag.clone(), Some(20214)),
-            // Different panel AND different score: only the score can decide.
             bag_ref("c2", "鱼鱼鱼", thumb_of("real_character_attributes.png"), Some(30111)),
         ];
         let current = vec![PanelFingerprint {
@@ -3103,9 +3737,13 @@ mod tests {
             score: Some(20214),
         }];
 
-        let (id, _, evidence) = associate_by_visual(&current, &refs, None).expect("score must link");
-        assert_eq!(id, "c1");
-        assert!(evidence.contains("20214"), "evidence {evidence}");
+        let assoc = associate_by_evidence(
+            &current, &refs, None, None, NOW_MS, &MatchPolicy::default(),
+        );
+        assert_eq!(assoc.character_id.as_deref(), Some("c1"));
+        let kinds: Vec<EvidenceKind> = assoc.evidence.iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&EvidenceKind::PanelThumb), "kinds {kinds:?}");
+        assert!(kinds.contains(&EvidenceKind::CharacterScore), "kinds {kinds:?}");
     }
 
     /// Two characters whose panels look alike must not be guessed at.
@@ -3122,7 +3760,7 @@ mod tests {
             thumb: bag,
             score: None,
         }];
-        assert!(associate_by_visual(&current, &refs, None).is_none());
+        assert!(visual(&current, &refs, None).is_none());
     }
 
     // ---- identity from 发色 / 武器 -----------------------------------------
@@ -3140,12 +3778,17 @@ mod tests {
         IdentityRef {
             character_id: id.to_string(),
             nickname: nick.to_string(),
+            game_id: None,
+            server: None,
+            level: None,
             fingerprints: vec![PanelFingerprint {
                 screen: ScreenKind::Inventory,
                 thumb,
                 score: None,
             }],
             appearance,
+            avatar_thumb: None,
+            last_seen_at: None,
         }
     }
 
@@ -3168,10 +3811,10 @@ mod tests {
         }];
         let now = look([66, 69, 71], Some([76, 196, 183]));
 
-        let (id, confidence, evidence) = associate_by_visual(&current, &refs, Some(&now))
+        let (id, confidence, evidence) = visual(&current, &refs, Some(&now))
             .expect("发色 + 武器 must link the capture");
         assert_eq!(id, "c1");
-        assert!(confidence >= 0.80 && confidence <= 0.88, "confidence {confidence}");
+        assert!(confidence > 0.15, "confidence {confidence}");
         assert!(evidence.contains("发色"), "evidence {evidence}");
     }
 
@@ -3202,7 +3845,7 @@ mod tests {
         }];
         let now = look([66, 69, 71], Some([76, 196, 183]));
 
-        let (id, _, _) = associate_by_visual(&current, &refs, Some(&now)).expect("c1 still wins");
+        let (id, _, _) = visual(&current, &refs, Some(&now)).expect("c1 still wins");
         assert_eq!(id, "c1");
     }
 
@@ -3221,7 +3864,7 @@ mod tests {
             score: None,
         }];
         let now = look([66, 69, 71], Some([76, 196, 183]));
-        assert!(associate_by_visual(&current, &refs, Some(&now)).is_none());
+        assert!(visual(&current, &refs, Some(&now)).is_none());
     }
 
     /// Two characters sharing a look must not be guessed between.
@@ -3238,7 +3881,7 @@ mod tests {
             score: None,
         }];
         let now = look([66, 69, 71], Some([76, 196, 183]));
-        assert!(associate_by_visual(&current, &refs, Some(&now)).is_none());
+        assert!(visual(&current, &refs, Some(&now)).is_none());
     }
 
     /// A character whose look was never recorded could be the real owner, so
@@ -3260,7 +3903,7 @@ mod tests {
             score: None,
         }];
         let now = look([66, 69, 71], Some([76, 196, 183]));
-        assert!(associate_by_visual(&current, &refs, Some(&now)).is_none());
+        assert!(visual(&current, &refs, Some(&now)).is_none());
     }
 
     /// "人物评分" is read as 入物评分 / 人份评分 depending on the crop, and the

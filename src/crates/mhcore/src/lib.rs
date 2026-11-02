@@ -31,12 +31,23 @@ impl Default for ScreenKind {
 pub enum IdentitySource {
     /// Read directly from an explicit 游戏ID field on the screenshot.
     IdField,
-    /// Nickname matched an existing character row.
+    /// Nickname matched exactly one existing character row.
     Nickname,
-    /// pHash/ORB snapshot matched a previously stored avatar image.
+    /// Visual / behavioural evidence matched a previously stored capture.
     VisualMatch,
+    /// Several rows matched equally well (same nickname on different
+    /// servers, or two characters sharing a look). Nothing is picked for the
+    /// user; the UI must ask.
+    Ambiguous,
     /// User typed the identity in by hand.
     Manual,
+}
+
+impl IdentitySource {
+    /// Whether this resolution may be written without the user confirming it.
+    pub fn is_conclusive(self) -> bool {
+        matches!(self, IdentitySource::IdField | IdentitySource::Manual)
+    }
 }
 
 /// A single recognised numeric attribute, carrying enough provenance for the
@@ -199,15 +210,90 @@ impl AppearanceSignature {
     }
 }
 
+/// One kind of evidence the association layer can weigh.
+///
+/// Deliberately not a free-form string: the weight each signal carries lives in
+/// `mhvision::MatchPolicy`, and the UI groups candidates by this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EvidenceKind {
+    /// 游戏ID printed on the panel — the only authoritative identity field.
+    GameId,
+    /// 人物评分. Unique per character *right now*, but it moves when equipment
+    /// or level changes, so it is an auxiliary signal, never an identity key.
+    CharacterScore,
+    /// Panel thumbnail similarity: "this is the same picture again".
+    PanelThumb,
+    /// 发色 / 武器: describes the character, survives item changes.
+    Appearance,
+    /// Cropped portrait similarity.
+    Avatar,
+    /// Recency: the character was captured recently, same session.
+    History,
+    /// Nickname text. Weak on its own (same name exists on other servers).
+    Nickname,
+}
+
+/// A single piece of evidence for one candidate, kept so the UI can show *why*
+/// a character was picked instead of only a final score.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchEvidence {
+    pub kind: EvidenceKind,
+    /// Raw strength of this signal in 0.0..=1.0, before weighting.
+    pub strength: f64,
+    /// How much this signal actually contributed (strength * policy weight).
+    pub contribution: f64,
+    /// Human-readable, e.g. "面板相似度 0.98（包裹）".
+    pub detail: String,
+}
+
+impl MatchEvidence {
+    pub fn new(kind: EvidenceKind, strength: f64, contribution: f64, detail: impl Into<String>) -> Self {
+        Self { kind, strength, contribution, detail: detail.into() }
+    }
+}
+
+/// One character the pipeline considered for a capture that carries no 游戏ID.
+///
+/// The pipeline returns these instead of guessing whenever the evidence does
+/// not clearly single out one row; the UI shows them so the user can pick.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityCandidate {
+    pub character_id: String,
+    pub nickname: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<i64>,
+    /// Combined confidence in 0.0..=1.0.
+    pub confidence: f64,
+    /// Every signal that voted for this candidate, strongest first.
+    #[serde(default)]
+    pub evidence: Vec<MatchEvidence>,
+}
+
 /// One character's stored fingerprints, handed to the recognition pipeline so
 /// it can link an unidentified capture. Never crosses the pipe.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IdentityRef {
     pub character_id: String,
     pub nickname: String,
+    pub game_id: Option<String>,
+    pub server: Option<String>,
+    pub level: Option<i64>,
     pub fingerprints: Vec<PanelFingerprint>,
     /// 发色 / 武器 recorded from this character's earlier captures.
     pub appearance: Option<AppearanceSignature>,
+    /// 16x16 grayscale thumbnail of the cropped portrait, when one was saved.
+    pub avatar_thumb: Option<String>,
+    /// When this character was last captured (ms since epoch), used as
+    /// context evidence — a character seen a minute ago is likelier than one
+    /// untouched for a month.
+    pub last_seen_at: Option<i64>,
 }
 
 /// The complete result of running the pipeline over one uploaded batch.
@@ -261,6 +347,19 @@ pub struct RecognitionResult {
     /// the character looks like rather than by what the panel looks like.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<AppearanceSignature>,
+    /// 16x16 grayscale thumbnail of the portrait cropped out of this batch.
+    /// Persisted so a future capture can be compared against the face itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_thumb: Option<String>,
+    /// Every character the association layer considered, best first. Empty
+    /// when the identity came from an explicit 游戏ID (nothing to choose).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<IdentityCandidate>,
+    /// Contradictions between signals, e.g. "视觉匹配指向 A，但游戏ID 明确是 B".
+    /// The pipeline resolves them in favour of the 游戏ID; they are surfaced so
+    /// a wrong visual model becomes visible instead of silently ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
 }
 
 impl RecognitionResult {
@@ -282,6 +381,9 @@ impl RecognitionResult {
             fingerprints: Vec::new(),
             identity_evidence: None,
             appearance: None,
+            avatar_thumb: None,
+            candidates: Vec::new(),
+            conflicts: Vec::new(),
         }
     }
 }
@@ -340,8 +442,15 @@ pub struct Snapshot {
 #[serde(rename_all = "camelCase")]
 pub struct AssetPoint {
     pub date: String,
-    pub gold: i64,
-    pub silver: i64,
+    /// Day total for 金币, or `None` when no capture that day showed 金币.
+    ///
+    /// `None` is *not* zero: a 人物属性 screenshot does not render currency at
+    /// all, so a day whose only capture was a portrait panel knows nothing
+    /// about the balance. Rendering that as 0 produced a fake "金币归零".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gold: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silver: Option<i64>,
 }
 
 /// Aggregate figures for the top of the 资产统计 page.
