@@ -147,9 +147,16 @@ if ($existing) {
     if ($LASTEXITCODE -ne 0) { throw "git tag 失败" }
     Write-Host "  已创建 $Tag" -ForegroundColor Green
 }
-git push origin $Tag 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Host "  tag 推送失败（可能已存在），继续" -ForegroundColor DarkYellow }
-else { Write-Host "  已推送 $Tag" -ForegroundColor Green }
+
+# tag 已推到远端就不再重复推（重复推会以 "already exists" 失败，属正常）
+$remoteTag = & git ls-remote --tags origin "refs/tags/$Tag" 2>$null
+if ($remoteTag) {
+    Write-Host "  远端已有 $Tag，跳过推送" -ForegroundColor DarkGray
+} else {
+    $pushOut = & git push origin $Tag 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "tag 推送失败：$pushOut" }
+    Write-Host "  已推送 $Tag" -ForegroundColor Green
+}
 
 # ---------------------------------------------------------------------------
 Write-Section '3. 创建 Release'
@@ -186,35 +193,36 @@ Write-Section '4. 上传产物'
 
 $uploadBase = ($rel.upload_url -split '\{')[0]
 $want = @(
-    @{ Path = $exePath; Name = $SingleExeName },
-    @{ Path = $zipPath; Name = $PortableZipName },
-    @{ Path = $sumPath; Name = $ChecksumName }
+    [pscustomobject]@{ File = $exePath; Asset = $SingleExeName },
+    [pscustomobject]@{ File = $zipPath; Asset = $PortableZipName },
+    [pscustomobject]@{ File = $sumPath; Asset = $ChecksumName }
 )
 
 foreach ($item in $want) {
-    $sizeMb = (Get-Item $item.Path).Length / 1MB
-    $q = "$uploadBase?name=$([uri]::EscapeDataString($item.Name))"
-    Write-Host ("  上传 {0} ({1:N1} MB)..." -f $item.Name, $sizeMb) -ForegroundColor Gray
+    $sizeMb = (Get-Item -LiteralPath $item.File).Length / 1MB
+    # 注意：必须用 ${uploadBase} 花括号形式，`"$uploadBase?name="` 会被 $? 吃掉
+    $q = "${uploadBase}?name=$([uri]::EscapeDataString($item.Asset))"
+    Write-Host ("  上传 {0} ({1:N1} MB)..." -f $item.Asset, $sizeMb) -ForegroundColor Gray
     $out = & curl.exe -sS --fail-with-body -X POST `
         -H "Authorization: Bearer $script:tok" `
         -H 'Accept: application/vnd.github+json' `
         -H 'User-Agent: mhrecorder-release' `
         -H 'Content-Type: application/octet-stream' `
-        --data-binary "@$($item.Path)" $q
+        --data-binary "@$($item.File)" $q 2>&1
     if ($LASTEXITCODE -ne 0) {
         # 同名资产已存在时 GitHub 会 422，先删再传
         if ($out -match 'already_exists') {
             Write-Host "  同名资产已存在，删除后重传" -ForegroundColor DarkYellow
             $assets = Invoke-GitHub -Method GET -Url "$api/releases/$($rel.id)/assets"
-            $old = $assets | Where-Object { $_.name -eq $item.Name } | Select-Object -First 1
-            if ($old) { Invoke-GitHub -Method DELETE -Url "$api/assets/$($old.id)" | Out-Null }
+            $old = $assets | Where-Object { $_.name -eq $item.Asset } | Select-Object -First 1
+            if ($old) { Invoke-GitHub -Method DELETE -Url "$api/releases/assets/$($old.id)" | Out-Null }
             $out = & curl.exe -sS --fail-with-body -X POST `
                 -H "Authorization: Bearer $script:tok" `
                 -H 'Content-Type: application/octet-stream' `
-                --data-binary "@$($item.Path)" $q
-            if ($LASTEXITCODE -ne 0) { throw "上传失败：$item.Name`n$out" }
+                --data-binary "@$($item.File)" $q 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "上传失败：$($item.Asset)`n$out" }
         } else {
-            throw "上传失败：$item.Name`n$out"
+            throw "上传失败：$($item.Asset)`n$out"
         }
     }
     Write-Host "    OK" -ForegroundColor Green
