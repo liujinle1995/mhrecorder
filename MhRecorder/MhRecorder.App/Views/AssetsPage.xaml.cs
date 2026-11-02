@@ -1,0 +1,247 @@
+using Microsoft.UI.Text;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Shapes;
+using MhRecorder.App.Services;
+using MhRecorder.Core.Models;
+using MhRecorder.Core.ViewModels;
+using Windows.UI;
+
+namespace MhRecorder.App.Views;
+
+/// <summary>Page 3 — 资产统计: three summary cards plus the two grouped bar charts.</summary>
+public sealed partial class AssetsPage : Page
+{
+    private static readonly SolidColorBrush GoldBrush = new(Color.FromArgb(255, 0xF6, 0xB8, 0x2B));
+    private static readonly SolidColorBrush SilverBrush = new(Color.FromArgb(255, 0x8A, 0x93, 0xA5));
+    private static readonly SolidColorBrush TextSecondary = new(Color.FromArgb(255, 0x6B, 0x6F, 0x76));
+    private static readonly SolidColorBrush TextTertiary = new(Color.FromArgb(255, 0x9A, 0xA0, 0xA6));
+    private static readonly SolidColorBrush BrandBlue = new(Color.FromArgb(255, 0x00, 0x74, 0xFF));
+
+    private StatisticsPayload _payload = new();
+
+    public AssetsPage()
+    {
+        InitializeComponent();
+        Loaded += OnLoaded;
+    }
+
+    private async void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            _payload = await AppServices.Instance.GetStatisticsAsync(5);
+            AppServices.LastStatistics = _payload;
+            ApplySummary();
+            RedrawAll();
+        }
+        catch (Exception ex)
+        {
+            App.Log($"AssetsPage.OnLoaded failed: {ex}");
+        }
+    }
+
+    private void ApplySummary()
+    {
+        var summary = _payload.Summary;
+        GoldTotalText.Text = Fmt.Number(summary.GoldTotal);
+        SilverTotalText.Text = Fmt.Number(summary.SilverTotal);
+        CharacterCountText.Text = Fmt.Number(summary.CharacterCount);
+
+        GoldChangeText.Text = summary.GoldChangePercent is { } g ? Fmt.Percent(g) : "—";
+        SilverChangeText.Text = summary.SilverChangePercent is { } s ? Fmt.Percent(s) : "—";
+        CharacterChangeText.Text = summary.CharacterChange is { } c && c != 0
+            ? $"{c:+0;-0} 个"
+            : "—";
+    }
+
+    private void RedrawAll()
+    {
+        DrawCharacterChart();
+        DrawRecentChart();
+    }
+
+    private void OnCharacterChartSizeChanged(object sender, SizeChangedEventArgs e) => DrawCharacterChart();
+    private void OnRecentChartSizeChanged(object sender, SizeChangedEventArgs e) => DrawRecentChart();
+
+    // ---------------- chart 1: per-character gold vs silver ----------------
+
+    private void DrawCharacterChart()
+    {
+        CharacterChartCanvas.Children.Clear();
+        if (_payload.Characters.Count == 0) return;
+
+        var width = CharacterChartCanvas.ActualWidth;
+        var height = CharacterChartCanvas.ActualHeight;
+        if (width <= 0 || height <= 0) return;
+
+        var labelAreaHeight = 46;   // avatar + nickname below the bars
+        var valueAreaHeight = 22;   // numbers above the bars
+        var plotHeight = Math.Max(40, height - labelAreaHeight - valueAreaHeight);
+        var maxValue = _payload.Characters.Max(c => Math.Max(c.GoldWan, c.SilverWan));
+        if (maxValue <= 0) maxValue = 1;
+
+        var groups = _payload.Characters.Count;
+        var slotWidth = width / groups;
+
+        for (var i = 0; i < groups; i++)
+        {
+            var item = _payload.Characters[i];
+            var slotLeft = i * slotWidth;
+            var center = slotLeft + slotWidth / 2;
+
+            var goldRatio = item.GoldWan / maxValue;
+            var silverRatio = item.SilverWan / maxValue;
+            var barWidth = Math.Min(16, slotWidth * 0.13);
+            var pairGap = 3;
+            var pairWidth = barWidth * 2 + pairGap;
+
+            var goldHeight = Math.Max(4, plotHeight * goldRatio);
+            var silverHeight = Math.Max(4, plotHeight * silverRatio);
+
+            var goldBar = new Rectangle
+            {
+                Width = barWidth,
+                Height = goldHeight,
+                Fill = GoldBrush,
+                RadiusX = 3,
+                RadiusY = 3,
+            };
+            Canvas.SetLeft(goldBar, center - pairWidth / 2);
+            Canvas.SetTop(goldBar, valueAreaHeight + (plotHeight - goldHeight));
+            CharacterChartCanvas.Children.Add(goldBar);
+
+            var silverBar = new Rectangle
+            {
+                Width = barWidth,
+                Height = silverHeight,
+                Fill = SilverBrush,
+                RadiusX = 3,
+                RadiusY = 3,
+            };
+            Canvas.SetLeft(silverBar, center - pairWidth / 2 + barWidth + pairGap);
+            Canvas.SetTop(silverBar, valueAreaHeight + (plotHeight - silverHeight));
+            CharacterChartCanvas.Children.Add(silverBar);
+
+            // Value labels above each bar
+            AddLabel(CharacterChartCanvas, $"{item.GoldWan:0}",
+                center - pairWidth / 2 - barWidth / 2 - 6,
+                valueAreaHeight + (plotHeight - goldHeight) - 19, barWidth + 22, 16, TextSecondary, 11, TextAlignment.Center);
+
+            AddLabel(CharacterChartCanvas, $"{item.SilverWan:0}",
+                center - pairWidth / 2 + barWidth + pairGap - 6,
+                valueAreaHeight + (plotHeight - silverHeight) - 19, barWidth + 22, 16, TextSecondary, 11, TextAlignment.Center);
+
+            // Avatar dot + nickname under the bars
+            var avatar = new Border
+            {
+                Width = 15,
+                Height = 15,
+                CornerRadius = new CornerRadius(7.5),
+                Background = new SolidColorBrush(Color.FromArgb(255, 0xE9, 0xED, 0xF6)),
+                Child = new TextBlock
+                {
+                    Text = Fmt.AvatarInitial(item.Nickname),
+                    FontSize = 9,
+                    Foreground = new SolidColorBrush(Color.FromArgb(255, 0x7A, 0x86, 0xA8)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                },
+            };
+            Canvas.SetLeft(avatar, center - 34);
+            Canvas.SetTop(avatar, valueAreaHeight + plotHeight + 10);
+            CharacterChartCanvas.Children.Add(avatar);
+
+            AddLabel(CharacterChartCanvas, item.Nickname,
+                center - 18, valueAreaHeight + plotHeight + 9, 74, 17, TextSecondary, 11.5, TextAlignment.Left);
+        }
+    }
+
+    // ---------------- chart 2: recent total assets ----------------
+
+    private void DrawRecentChart()
+    {
+        RecentChartCanvas.Children.Clear();
+        var recent = _payload.Recent;
+        if (recent.Count == 0) return;
+
+        var width = RecentChartCanvas.ActualWidth;
+        var height = RecentChartCanvas.ActualHeight;
+        if (width <= 0 || height <= 0) return;
+
+        var labelAreaHeight = 30;
+        var valueAreaHeight = 24;
+        var plotHeight = Math.Max(40, height - labelAreaHeight - valueAreaHeight);
+        var maxValue = recent.Max(p => Math.Max(p.Gold, p.Silver));
+        if (maxValue <= 0) maxValue = 1;
+
+        var slotWidth = width / recent.Count;
+
+        for (var i = 0; i < recent.Count; i++)
+        {
+            var point = recent[i];
+            var center = i * slotWidth + slotWidth / 2;
+            var isCurrent = i == recent.Count - 1;
+
+            var barWidth = Math.Min(17, slotWidth * 0.16);
+            var pairGap = 4;
+            var pairWidth = barWidth * 2 + pairGap;
+
+            var goldHeight = Math.Max(4, plotHeight * (point.Gold / maxValue));
+            var silverHeight = Math.Max(4, plotHeight * (point.Silver / maxValue));
+
+            var goldBar = new Rectangle
+            {
+                Width = barWidth, Height = goldHeight, Fill = GoldBrush,
+                RadiusX = 3, RadiusY = 3,
+            };
+            Canvas.SetLeft(goldBar, center - pairWidth / 2);
+            Canvas.SetTop(goldBar, valueAreaHeight + (plotHeight - goldHeight));
+            RecentChartCanvas.Children.Add(goldBar);
+
+            var silverBar = new Rectangle
+            {
+                Width = barWidth, Height = silverHeight, Fill = SilverBrush,
+                RadiusX = 3, RadiusY = 3,
+            };
+            Canvas.SetLeft(silverBar, center - pairWidth / 2 + barWidth + pairGap);
+            Canvas.SetTop(silverBar, valueAreaHeight + (plotHeight - silverHeight));
+            RecentChartCanvas.Children.Add(silverBar);
+
+            var valueColor = isCurrent ? BrandBlue : TextSecondary;
+
+            AddLabel(RecentChartCanvas, Fmt.Number(point.Gold),
+                center - pairWidth / 2 - 10,
+                valueAreaHeight + (plotHeight - goldHeight) - 20,
+                barWidth + 32, 17, valueColor, 11.5, TextAlignment.Center);
+
+            AddLabel(RecentChartCanvas, Fmt.Number(point.Silver),
+                center - pairWidth / 2 + barWidth + pairGap - 10,
+                valueAreaHeight + (plotHeight - silverHeight) - 20,
+                barWidth + 32, 17, valueColor, 11.5, TextAlignment.Center);
+
+            AddLabel(RecentChartCanvas, point.Date,
+                center - 30, valueAreaHeight + plotHeight + 9, 60, 17,
+                isCurrent ? BrandBlue : TextTertiary, 11.5, TextAlignment.Center);
+        }
+    }
+
+    private static void AddLabel(Canvas host, string text, double left, double top,
+        double width, double height, Brush foreground, double fontSize, TextAlignment alignment)
+    {
+        var block = new TextBlock
+        {
+            Text = text,
+            FontSize = fontSize,
+            Foreground = foreground,
+            Width = width,
+            Height = height,
+            TextAlignment = alignment,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Canvas.SetLeft(block, left);
+        Canvas.SetTop(block, top);
+        host.Children.Add(block);
+    }
+}

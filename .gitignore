@@ -1,0 +1,37 @@
+# ---- Rust 构建缓存（体积巨大，不入库） ----
+/src/target/
+target/
+
+# ---- .NET 中间产物 ----
+# 只匹配 C# 项目的 bin/obj。**不能用全局 `bin/`**：那会连
+# src/crates/mhpack/src/bin/（mhlaunch.rs 的入口目录）和
+# native/*/bin/（原生 dll）一起忽略掉。
+/MhRecorder/**/bin/
+/MhRecorder/**/obj/
+.vs/
+*.user
+*.suo
+*.ilk
+*.cache
+*.pdb
+
+# ---- WorkBuddy 本地数据 ----
+.workbuddy/
+
+# ---- 构建产物：只走 GitHub Releases（scripts\release.ps1），不入库 ----
+/dist/
+
+# ---- 系统 / 编辑器 ----
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~
+
+# ---- 运行时日志与临时抓图 ----
+*.log
+logs/
+tmp/
+temp/
+capture_dump_*.png
+*.tmp

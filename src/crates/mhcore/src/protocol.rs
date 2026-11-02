@@ -1,0 +1,135 @@
+//! JSON-RPC-style wire protocol between the C# front end and the Rust
+//! `mhservice` backend over a Windows named pipe.
+//!
+//! One request per line with these keys:
+//! * `id`       - echo back so the client can correlate responses
+//! * `method`   - e.g. `recognize`, `characters.list`
+//! * `params`   - method-specific object
+//!
+//! One response per line:
+//! * `id`       - mirrored from the request
+//! * `ok`       - true when the method succeeded
+//! * `result`   - method payload on success
+//! * `error`    - `{ code, message }` on failure
+//!
+//! The transport is newline-delimited UTF-8 JSON. Base64 is used for binary
+//! payloads (screenshots) so the protocol stays line-safe.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Current protocol version. The client refuses to talk to a backend built
+/// against a different major version.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Request {
+    pub id: u64,
+    pub method: String,
+    #[serde(default)]
+    pub params: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorBody {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Response {
+    pub id: u64,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorBody>,
+}
+
+impl Response {
+    pub fn ok(id: u64, result: Value) -> Self {
+        Self { id, ok: true, result: Some(result), error: None }
+    }
+
+    pub fn err(id: u64, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            id,
+            ok: false,
+            result: None,
+            error: Some(ErrorBody { code: code.to_string(), message: message.into() }),
+        }
+    }
+}
+
+/// Canonical method names. Keeping them in one place stops the C# client and
+/// the Rust dispatcher drifting apart.
+pub mod method {
+    pub const PING: &str = "ping";
+    pub const VERSION: &str = "version";
+    pub const RECOGNIZE: &str = "recognize";
+    pub const RECOGNIZE_SAVE: &str = "recognize.save";
+    pub const CHARACTERS_LIST: &str = "characters.list";
+    pub const CHARACTERS_GET: &str = "characters.get";
+    pub const CHARACTERS_UPDATE: &str = "characters.update";
+    pub const CHARACTERS_DELETE: &str = "characters.delete";
+    pub const CHARACTERS_CONFIRM: &str = "characters.confirm";
+    pub const STATISTICS: &str = "statistics.get";
+    pub const SETTINGS_GET: &str = "settings.get";
+    pub const SETTINGS_SET: &str = "settings.set";
+    pub const EXPORT_JSON: &str = "export.json";
+    pub const EXPORT_CSV: &str = "export.csv";
+    pub const EXPORT_ZIP: &str = "export.zip";
+    pub const DATA_CLEAR: &str = "data.clear";
+}
+
+/// Error codes the client switch-cases on.
+pub mod errcode {
+    pub const BAD_REQUEST: &str = "badRequest";
+    pub const NOT_FOUND: &str = "notFound";
+    pub const DECODE: &str = "decodeFailed";
+    pub const OCR: &str = "ocrFailed";
+    pub const STORAGE: &str = "storageFailed";
+    pub const IO: &str = "ioFailed";
+    pub const INTERNAL: &str = "internal";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_roundtrips() {
+        let r = Request { id: 7, method: "ping".into(), params: serde_json::json!({}) };
+        let line = serde_json::to_string(&r).unwrap();
+        assert!(!line.contains('\n'));
+        let back: Request = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.id, 7);
+        assert_eq!(back.method, "ping");
+    }
+
+    #[test]
+    fn success_response_omits_error() {
+        let r = Response::ok(1, serde_json::json!({"status":"ready"}));
+        let line = serde_json::to_string(&r).unwrap();
+        assert!(!line.contains("error"));
+        assert!(line.contains("\"ok\":true"));
+    }
+
+    #[test]
+    fn error_response_omits_result() {
+        let r = Response::err(2, errcode::BAD_REQUEST, "missing field");
+        let line = serde_json::to_string(&r).unwrap();
+        assert!(!line.contains("result"));
+        let back: Response = serde_json::from_str(&line).unwrap();
+        assert!(!back.ok);
+        assert_eq!(back.error.unwrap().code, "badRequest");
+    }
+
+    #[test]
+    fn method_names_are_stable() {
+        assert_eq!(method::CHARACTERS_LIST, "characters.list");
+    }
+}

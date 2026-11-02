@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="MhRecorder.App.Views.CharactersPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Background="{StaticResource WindowBackgroundBrush}">
+
+    <Page.Resources>
+        <!-- Rounded search field matching the mock's soft grey input. -->
+        <Style x:Key="SearchTextBoxStyle" TargetType="TextBox">
+            <Setter Property="Height" Value="36" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="Background" Value="{StaticResource CardBackgroundBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="12,0" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+    </Page.Resources>
+
+    <Grid Padding="26,20,26,18" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- header -->
+        <StackPanel Grid.Row="0" Spacing="6">
+            <TextBlock Text="角色管理" Style="{StaticResource PageTitleText}" />
+            <TextBlock x:Name="SubtitleText"
+                       Text="导入的角色都会在这里以卡片呈现，共 5 个角色 · 最近导入 今天 14:32"
+                       Style="{StaticResource PageSubtitleText}" />
+        </StackPanel>
+
+        <!-- search + new button -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <TextBox x:Name="SearchBox" Grid.Column="0" Width="300"
+                     Style="{StaticResource SearchTextBoxStyle}"
+                     PlaceholderText="搜索角色昵称"
+                     AutomationProperties.AutomationId="CharacterSearchBox"
+                     TextChanged="OnSearchTextChanged" />
+
+            <Button x:Name="NewCharacterButton" Grid.Column="2"
+                    AutomationProperties.AutomationId="NewCharacterButton"
+                    Content="新建角色"
+                    Style="{StaticResource PrimaryButtonStyle}"
+                    Padding="18,8"
+                    Click="OnNewCharacterClick" />
+        </Grid>
+
+        <!-- carousel -->
+        <Grid Grid.Row="2">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <TextBlock x:Name="EmptyCharactersText" Grid.Row="0"
+                       Text="还没有角色，导入一张截图开始吧"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       FontSize="14" Foreground="{StaticResource TextTertiaryBrush}"
+                       Visibility="Collapsed" />
+
+            <!-- cards are built in code-behind so the centre card can be raised/scaled exactly as in the mock.
+                 A Canvas does not clip its children, so the hosting Grid clips via a RectangleGeometry. -->
+            <Grid x:Name="CarouselHost" Grid.Row="0" SizeChanged="OnCarouselHostSizeChanged">
+                <Grid.Clip>
+                    <RectangleGeometry x:Name="CarouselClip" Rect="0,0,0,0" />
+                </Grid.Clip>
+                <Canvas x:Name="CarouselCanvas"
+                        SizeChanged="OnCarouselSizeChanged" />
+            </Grid>
+
+            <!-- pagination -->
+            <Grid Grid.Row="1" Margin="0,10,0,0">
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"
+                            Spacing="6" VerticalAlignment="Center">
+                    <Button AutomationProperties.AutomationId="CarouselPrev" Click="OnPrevClick"
+                            Style="{StaticResource LinkButtonStyle}" Padding="8,4"
+                            Content="&#xE76B;" FontFamily="{StaticResource IconFontFamily}" FontSize="12"
+                            Foreground="{StaticResource TextTertiaryBrush}" />
+                    <StackPanel x:Name="DotsPanel" Orientation="Horizontal" Spacing="7" VerticalAlignment="Center" />
+                    <Button AutomationProperties.AutomationId="CarouselNext" Click="OnNextClick"
+                            Style="{StaticResource LinkButtonStyle}" Padding="8,4"
+                            Content="&#xE76C;" FontFamily="{StaticResource IconFontFamily}" FontSize="12"
+                            Foreground="{StaticResource TextTertiaryBrush}" />
+                </StackPanel>
+            </Grid>
+        </Grid>
+
+        <!-- footer hint -->
+        <TextBlock Grid.Row="3" Text="键盘左右键或滚轮切换角色"
+                   HorizontalAlignment="Center" FontSize="12"
+                   Foreground="{StaticResource TextTertiaryBrush}" />
+    </Grid>
+</Page>

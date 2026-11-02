@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="MhRecorder.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:controls="using:MhRecorder.App.Controls"
+    mc:Ignorable="d">
+
+    <Grid x:Name="RootLayout" Background="{StaticResource WindowBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- ============ Title bar ============ -->
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Height="52"
+              Background="{StaticResource ChromeBackgroundBrush}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- macOS-style traffic lights, matching the design mock's window chrome -->
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center"
+                        Margin="20,0,0,0" Spacing="8">
+                <Ellipse Width="11" Height="11" Fill="#FFFF5F57" />
+                <Ellipse Width="11" Height="11" Fill="#FFFEBC2E" />
+                <Ellipse Width="11" Height="11" Fill="#FF28C840" />
+            </StackPanel>
+
+            <TextBlock Grid.Column="1"
+                       Text="梦幻手游记录助手"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       FontFamily="{StaticResource UiDisplayFontFamily}"
+                       FontSize="13"
+                       FontWeight="SemiBold"
+                       Foreground="{StaticResource TextPrimaryBrush}" />
+
+            <TextBlock x:Name="BackendBadge" Grid.Column="2"
+                       Margin="0,0,18,0"
+                       VerticalAlignment="Center"
+                       FontSize="11.5"
+                       Foreground="{StaticResource TextTertiaryBrush}" />
+        </Grid>
+
+        <!-- ============ Body: sidebar + page host ============ -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="254" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Sidebar -->
+            <Grid Grid.Column="0" Background="{StaticResource SidebarBackgroundBrush}">
+                <StackPanel Margin="20,14,20,0" Spacing="2">
+                    <TextBlock Text="功能导航"
+                               Margin="14,0,0,8"
+                               FontSize="12.5"
+                               Foreground="{StaticResource TextTertiaryBrush}" />
+
+                    <Button x:Name="NavImport" Style="{StaticResource NavItemButtonStyle}"
+                            AutomationProperties.AutomationId="NavImport"
+                            Click="OnNavImportClick">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="NavImportText" Grid.Column="0" Text="录入识别"
+                                       FontSize="14" VerticalAlignment="Center" />
+                            <TextBlock x:Name="NavImportIcon" Grid.Column="1" Text="&#xEB9F;"
+                                       FontFamily="{StaticResource IconFontFamily}" FontSize="14"
+                                       VerticalAlignment="Center" />
+                        </Grid>
+                    </Button>
+
+                    <Button x:Name="NavCharacters" Style="{StaticResource NavItemButtonStyle}"
+                            AutomationProperties.AutomationId="NavCharacters"
+                            Click="OnNavCharactersClick">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="NavCharactersText" Grid.Column="0" Text="角色管理"
+                                       FontSize="14" VerticalAlignment="Center" />
+                            <TextBlock x:Name="NavCharactersIcon" Grid.Column="1" Text="&#xE8B7;"
+                                       FontFamily="{StaticResource IconFontFamily}" FontSize="14"
+                                       VerticalAlignment="Center" />
+                        </Grid>
+                    </Button>
+
+                    <Button x:Name="NavAssets" Style="{StaticResource NavItemButtonStyle}"
+                            AutomationProperties.AutomationId="NavAssets"
+                            Click="OnNavAssetsClick">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="NavAssetsText" Grid.Column="0" Text="资产统计"
+                                       FontSize="14" VerticalAlignment="Center" />
+                            <TextBlock x:Name="NavAssetsIcon" Grid.Column="1" Text="&#xE9D2;"
+                                       FontFamily="{StaticResource IconFontFamily}" FontSize="14"
+                                       VerticalAlignment="Center" />
+                        </Grid>
+                    </Button>
+
+                    <Button x:Name="NavSettings" Style="{StaticResource NavItemButtonStyle}"
+                            AutomationProperties.AutomationId="NavSettings"
+                            Click="OnNavSettingsClick">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="NavSettingsText" Grid.Column="0" Text="设置"
+                                       FontSize="14" VerticalAlignment="Center" />
+                            <TextBlock x:Name="NavSettingsIcon" Grid.Column="1" Text="&#xE713;"
+                                       FontFamily="{StaticResource IconFontFamily}" FontSize="14"
+                                       VerticalAlignment="Center" />
+                        </Grid>
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <!-- Page host -->
+            <Frame x:Name="ContentFrame" Grid.Column="1"
+                   Background="{StaticResource WindowBackgroundBrush}" />
+        </Grid>
+
+        <!-- ============ Footer status bar ============ -->
+        <Grid Grid.Row="2" Height="40" Background="{StaticResource ChromeBackgroundBrush}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8"
+                        VerticalAlignment="Center" Margin="30,0,0,0">
+                <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessGreenBrush}" VerticalAlignment="Center" />
+                <TextBlock x:Name="FooterStatusText"
+                           Text="已离线运行 · 数据存于本地 JSON"
+                           FontSize="12"
+                           Foreground="{StaticResource TextTertiaryBrush}" />
+            </StackPanel>
+
+            <TextBlock x:Name="FooterSnapshotText" Grid.Column="2"
+                       Text="最近资产快照：今天 14:32"
+                       Margin="0,0,30,0"
+                       FontSize="12"
+                       Foreground="{StaticResource TextTertiaryBrush}" />
+        </Grid>
+    </Grid>
+</Window>

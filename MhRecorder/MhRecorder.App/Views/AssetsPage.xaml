@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="MhRecorder.App.Views.AssetsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Background="{StaticResource WindowBackgroundBrush}">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" VerticalScrollMode="Auto"
+                  HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
+        <Grid Padding="26,20,26,20" RowSpacing="14">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- header -->
+            <StackPanel Grid.Row="0" Spacing="6">
+                <TextBlock Text="资产统计" Style="{StaticResource PageTitleText}" />
+                <TextBlock Text="追踪金币与银币的累计变化，掌握账号整体资产走向"
+                           Style="{StaticResource PageSubtitleText}" />
+            </StackPanel>
+
+            <!-- summary cards -->
+            <Grid Grid.Row="1" ColumnSpacing="16" Height="108">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Style="{StaticResource CardBorderStyle}" Padding="20,16">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="金币总量" Style="{StaticResource LabelText}" />
+                        <TextBlock x:Name="GoldTotalText" Text="2,942,685"
+                                   Style="{StaticResource BigNumberText}" Margin="0,4,0,0" />
+                        <StackPanel Orientation="Horizontal" Spacing="5" Margin="0,2,0,0">
+                            <TextBlock Text="较上次" FontSize="12"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                            <TextBlock x:Name="GoldChangeText" Text="+3.2%" FontSize="12"
+                                       Foreground="{StaticResource SuccessGreenBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Grid.Column="1" Style="{StaticResource CardBorderStyle}" Padding="20,16">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="银币总量" Style="{StaticResource LabelText}" />
+                        <TextBlock x:Name="SilverTotalText" Text="14,297,169"
+                                   Style="{StaticResource BigNumberText}" Margin="0,4,0,0" />
+                        <StackPanel Orientation="Horizontal" Spacing="5" Margin="0,2,0,0">
+                            <TextBlock Text="较上次" FontSize="12"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                            <TextBlock x:Name="SilverChangeText" Text="+1.8%" FontSize="12"
+                                       Foreground="{StaticResource SuccessGreenBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}" Padding="20,16">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="角色总数" Style="{StaticResource LabelText}" />
+                        <TextBlock x:Name="CharacterCountText" Text="5"
+                                   Style="{StaticResource BigNumberText}" Margin="0,4,0,0" />
+                        <StackPanel Orientation="Horizontal" Spacing="5" Margin="0,2,0,0">
+                            <TextBlock Text="较上次" FontSize="12"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                            <TextBlock x:Name="CharacterChangeText" Text="+1 个" FontSize="12"
+                                       Foreground="{StaticResource SuccessGreenBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <!-- per-character comparison chart -->
+            <Border Grid.Row="2" Style="{StaticResource CardBorderStyle}" Padding="20,16" Height="330">
+                <Grid RowSpacing="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0">
+                        <TextBlock Text="各角色金币与银币对比" Style="{StaticResource CardTitleText}"
+                                   VerticalAlignment="Center" />
+                        <StackPanel Orientation="Horizontal" Spacing="14" HorizontalAlignment="Right"
+                                    VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <Ellipse Width="7" Height="7" Fill="{StaticResource GoldAccentBrush}"
+                                         VerticalAlignment="Center" />
+                                <TextBlock Text="金币" FontSize="12"
+                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <Ellipse Width="7" Height="7" Fill="{StaticResource SilverAccentBrush}"
+                                         VerticalAlignment="Center" />
+                                <TextBlock Text="银币" FontSize="12"
+                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="单位：万元" FontSize="12"
+                                       Foreground="{StaticResource TextTertiaryBrush}"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
+
+                    <Canvas x:Name="CharacterChartCanvas" Grid.Row="1" SizeChanged="OnCharacterChartSizeChanged" />
+
+                    <TextBlock Grid.Row="2"
+                               Text="金币与银币分别按各自峰值缩放，用于对比角色间差异"
+                               FontSize="12"
+                               Foreground="{StaticResource TextTertiaryBrush}" />
+                </Grid>
+            </Border>
+
+            <!-- recent totals chart -->
+            <Border Grid.Row="3" Style="{StaticResource CardBorderStyle}" Padding="20,16" Height="290">
+                <Grid RowSpacing="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0">
+                        <TextBlock Text="最近 5 次记录的总资产" Style="{StaticResource CardTitleText}"
+                                   VerticalAlignment="Center" />
+                        <StackPanel Orientation="Horizontal" Spacing="14" HorizontalAlignment="Right"
+                                    VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <Ellipse Width="7" Height="7" Fill="{StaticResource GoldAccentBrush}"
+                                         VerticalAlignment="Center" />
+                                <TextBlock Text="总金币" FontSize="12"
+                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <Ellipse Width="7" Height="7" Fill="{StaticResource SilverAccentBrush}"
+                                         VerticalAlignment="Center" />
+                                <TextBlock Text="总银币" FontSize="12"
+                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="单位：万元" FontSize="12"
+                                       Foreground="{StaticResource TextTertiaryBrush}"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
+
+                    <Canvas x:Name="RecentChartCanvas" Grid.Row="1" SizeChanged="OnRecentChartSizeChanged" />
+                </Grid>
+            </Border>
+        </Grid>
+    </ScrollViewer>
+</Page>

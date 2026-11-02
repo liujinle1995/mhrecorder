@@ -1,0 +1,39 @@
+[package]
+name = "mhpack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Two executables come out of this one crate:
+#
+#   mhlaunch.exe — GUI subsystem, the *stem* that ships. It carries the ZIP
+#                  payload and starts the app. Because Windows never allocates a
+#                  console for a GUI-subsystem image, the "黑窗" that used to
+#                  stay open for the whole session is gone for good (a console
+#                  launcher's console was inherited by `mhservice`, which then
+#                  logged into it — see the 0.9.3 notes).
+#   mhpack.exe   — console subsystem, build tool only (`pack` / `verify`). The
+#                  packaging script reads its stdout and exit code, which needs
+#                  a real console. A GUI-subsystem tool would make PowerShell
+#                  return before the output arrives and silently ship a stale
+#                  artifact, which is exactly what happened when we tried one
+#                  binary for both jobs.
+#
+# Shared logic lives in the library so both binaries stay thin.
+[lib]
+name = "mhpack"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mhpack"
+path = "src/main.rs"
+
+[[bin]]
+name = "mhlaunch"
+path = "src/bin/mhlaunch.rs"
+
+# Deliberately minimal dependency set: the launcher stem is tiny and every
+# dependency is paid for at its own startup.
+[dependencies]
+anyhow.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }

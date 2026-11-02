@@ -1,0 +1,23 @@
+[package]
+name = "mhcli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Same native-DLL/model placement as mhservice so the CLI also runs standalone.
+build = "build.rs"
+
+[[bin]]
+name = "mhcli"
+path = "src/main.rs"
+
+[dependencies]
+mhcore = { path = "../mhcore" }
+mhstore = { path = "../mhstore" }
+mhvision = { path = "../mhvision" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+image.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
