@@ -65,6 +65,7 @@ public sealed class RemoteAppService : IAppService
         {
             ExportFormat.Json => Methods.ExportJson,
             ExportFormat.Csv => Methods.ExportCsv,
+            ExportFormat.Backup => Methods.ExportBackup,
             _ => Methods.ExportZip,
         };
         return await _client.ExportAsync(method, path, ct).ConfigureAwait(false);
@@ -78,6 +79,9 @@ public sealed class RemoteAppService : IAppService
 
     public async Task UpdateCharacterIdentityAsync(string id, string? nickname, string? gameId, long? level, CancellationToken ct = default) =>
         await _client.UpdateCharacterAsync(id, nickname, gameId, level, ct).ConfigureAwait(false);
+
+    public async Task ConfirmCharacterAsync(string id, double confidence, CancellationToken ct = default) =>
+        await _client.ConfirmCharacterAsync(id, confidence, ct).ConfigureAwait(false);
 
     public async Task<CharacterDetail?> GetCharacterAsync(string id, CancellationToken ct = default) =>
         await _client.GetCharacterAsync(id, ct).ConfigureAwait(false);

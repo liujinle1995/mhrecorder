@@ -41,8 +41,11 @@
                        FontWeight="SemiBold"
                        Foreground="{StaticResource TextPrimaryBrush}" />
 
+            <!-- Right margin reserves the system caption buttons' width (3 x 46
+                 DIPs) — the app draws its own title bar, and content placed under
+                 those buttons is unreadable. -->
             <TextBlock x:Name="BackendBadge" Grid.Column="2"
-                       Margin="0,0,18,0"
+                       Margin="0,0,152,0"
                        VerticalAlignment="Center"
                        FontSize="11.5"
                        Foreground="{StaticResource TextTertiaryBrush}" />
@@ -51,14 +54,14 @@
         <!-- ============ Body: sidebar + page host ============ -->
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="254" />
+                <ColumnDefinition x:Name="SidebarColumn" Width="254" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
             <!-- Sidebar -->
             <Grid Grid.Column="0" Background="{StaticResource SidebarBackgroundBrush}">
                 <StackPanel Margin="20,14,20,0" Spacing="2">
-                    <TextBlock Text="功能导航"
+                    <TextBlock x:Name="SidebarCaption" Text="功能导航"
                                Margin="14,0,0,8"
                                FontSize="12.5"
                                Foreground="{StaticResource TextTertiaryBrush}" />

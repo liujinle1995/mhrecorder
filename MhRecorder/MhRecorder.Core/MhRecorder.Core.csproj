@@ -10,4 +10,11 @@
     <CodePage>65001</CodePage>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- MVVM 基座：ObservableProperty / RelayCommand 源生成器。
+         之前每个页面手写 INotifyPropertyChanged 与事件处理，绑定层是空的；
+         引入它以后 ViewModel 才算真正存在，页面只留 XAML 绑定。 -->
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+  </ItemGroup>
 </Project>

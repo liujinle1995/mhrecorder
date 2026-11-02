@@ -33,12 +33,12 @@
                 <Border Grid.Column="0" Style="{StaticResource CardBorderStyle}" Padding="20,16">
                     <StackPanel Spacing="2">
                         <TextBlock Text="金币总量" Style="{StaticResource LabelText}" />
-                        <TextBlock x:Name="GoldTotalText" Text="2,942,685"
+                        <TextBlock Text="{x:Bind ViewModel.GoldTotalText, Mode=OneWay}"
                                    Style="{StaticResource BigNumberText}" Margin="0,4,0,0" />
                         <StackPanel Orientation="Horizontal" Spacing="5" Margin="0,2,0,0">
                             <TextBlock Text="较上次" FontSize="12"
                                        Foreground="{StaticResource TextTertiaryBrush}" />
-                            <TextBlock x:Name="GoldChangeText" Text="+3.2%" FontSize="12"
+                            <TextBlock Text="{x:Bind ViewModel.GoldChangeText, Mode=OneWay}" FontSize="12"
                                        Foreground="{StaticResource SuccessGreenBrush}" />
                         </StackPanel>
                     </StackPanel>
@@ -47,12 +47,12 @@
                 <Border Grid.Column="1" Style="{StaticResource CardBorderStyle}" Padding="20,16">
                     <StackPanel Spacing="2">
                         <TextBlock Text="银币总量" Style="{StaticResource LabelText}" />
-                        <TextBlock x:Name="SilverTotalText" Text="14,297,169"
+                        <TextBlock Text="{x:Bind ViewModel.SilverTotalText, Mode=OneWay}"
                                    Style="{StaticResource BigNumberText}" Margin="0,4,0,0" />
                         <StackPanel Orientation="Horizontal" Spacing="5" Margin="0,2,0,0">
                             <TextBlock Text="较上次" FontSize="12"
                                        Foreground="{StaticResource TextTertiaryBrush}" />
-                            <TextBlock x:Name="SilverChangeText" Text="+1.8%" FontSize="12"
+                            <TextBlock Text="{x:Bind ViewModel.SilverChangeText, Mode=OneWay}" FontSize="12"
                                        Foreground="{StaticResource SuccessGreenBrush}" />
                         </StackPanel>
                     </StackPanel>
@@ -61,12 +61,12 @@
                 <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}" Padding="20,16">
                     <StackPanel Spacing="2">
                         <TextBlock Text="角色总数" Style="{StaticResource LabelText}" />
-                        <TextBlock x:Name="CharacterCountText" Text="5"
+                        <TextBlock Text="{x:Bind ViewModel.CharacterCountText, Mode=OneWay}"
                                    Style="{StaticResource BigNumberText}" Margin="0,4,0,0" />
                         <StackPanel Orientation="Horizontal" Spacing="5" Margin="0,2,0,0">
                             <TextBlock Text="较上次" FontSize="12"
                                        Foreground="{StaticResource TextTertiaryBrush}" />
-                            <TextBlock x:Name="CharacterChangeText" Text="+1 个" FontSize="12"
+                            <TextBlock Text="{x:Bind ViewModel.CharacterChangeText, Mode=OneWay}" FontSize="12"
                                        Foreground="{StaticResource SuccessGreenBrush}" />
                         </StackPanel>
                     </StackPanel>

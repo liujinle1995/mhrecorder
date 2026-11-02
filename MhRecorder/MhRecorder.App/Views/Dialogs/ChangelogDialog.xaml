@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ContentDialog
+    x:Class="MhRecorder.App.Views.Dialogs.ChangelogDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        CloseButtonText="关闭"
+    DefaultButton="None"
+    RequestedTheme="Light"
+    Background="{StaticResource CardBackgroundBrush}"
+    CornerRadius="16"
+    Padding="24,22,24,20">
+
+    <ContentDialog.Title>
+        <TextBlock Text="版本更新记录"
+                   FontFamily="{StaticResource UiDisplayFontFamily}"
+                   FontSize="17"
+                   FontWeight="SemiBold"
+                   Foreground="{StaticResource TextPrimaryBrush}" />
+    </ContentDialog.Title>
+
+    <StackPanel Spacing="16" Width="470">
+
+        <!-- 当前构建 + 是否最新 -->
+        <Border Background="{StaticResource SubtleFillBrush}" CornerRadius="10" Padding="14,10">
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessGreenBrush}"
+                         VerticalAlignment="Center" />
+                <TextBlock Text="{x:Bind CurrentBuildLine}"
+                           FontSize="12.5"
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           VerticalAlignment="Center" />
+            </StackPanel>
+        </Border>
+
+        <ScrollViewer MaxHeight="360"
+                      VerticalScrollBarVisibility="Visible"
+                      VerticalScrollMode="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      HorizontalScrollMode="Disabled"
+                      Margin="0,0,-2,0">
+            <ItemsControl ItemsSource="{x:Bind Entries}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate >
+                        <StackPanel Spacing="7" Margin="0,0,0,20">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="{Binding Version}"
+                                           FontSize="14"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource TextPrimaryBrush}"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding Date}"
+                                           FontSize="12"
+                                           Foreground="{StaticResource TextTertiaryBrush}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+
+                            <ItemsControl ItemsSource="{Binding Changes}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}"
+                                                   FontSize="12.5"
+                                                   LineHeight="19"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,0,0,5"
+                                                   Foreground="{StaticResource TextSecondaryBrush}" />
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+    </StackPanel>
+</ContentDialog>

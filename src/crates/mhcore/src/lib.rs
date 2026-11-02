@@ -360,6 +360,52 @@ pub struct RecognitionResult {
     /// a wrong visual model becomes visible instead of silently ignored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<String>,
+    /// Where on the source screenshot each recognised value came from.
+    ///
+    /// A wrong number is only actionable if you can see *which pixels* it was
+    /// read from, so every field carries its OCR box back to the UI. Pixel
+    /// coordinates refer to the image as submitted (panel cropping already
+    /// folded back in), which is what the review workspace draws on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<FieldRegion>,
+}
+
+/// One box on a source screenshot that produced a recognised value.
+///
+/// `kind` separates what the box means to the reviewer:
+/// * `field`    — a numeric field (气血 / 金币 …)
+/// * `identity` — 昵称 / 游戏ID / 等级 read off the panel
+/// * `item`     — one inventory cell
+/// * `feature`  — a region the matcher uses rather than displays (头像 / 外观)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldRegion {
+    /// Index of the image inside the recognised batch.
+    pub screen_index: usize,
+    pub screen: ScreenKind,
+    /// Machine key: `hp`, `gold`, `nickname`, `item:金柳露`, `feature:avatar` …
+    pub key: String,
+    /// Human label the UI puts on the box: 气血 / 金币 / 昵称 …
+    pub label: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    /// Raw OCR text inside the box, before any parsing.
+    pub raw_text: String,
+    /// 0.0 - 1.0 confidence reported by the recogniser for this box.
+    pub confidence: f64,
+    /// Parsed value when this box carries a number (`None` for 昵称 etc).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<i64>,
+    pub kind: String,
+}
+
+impl FieldRegion {
+    pub const KIND_FIELD: &'static str = "field";
+    pub const KIND_IDENTITY: &'static str = "identity";
+    pub const KIND_ITEM: &'static str = "item";
+    pub const KIND_FEATURE: &'static str = "feature";
 }
 
 impl RecognitionResult {
@@ -384,6 +430,7 @@ impl RecognitionResult {
             avatar_thumb: None,
             candidates: Vec::new(),
             conflicts: Vec::new(),
+            regions: Vec::new(),
         }
     }
 }

@@ -152,6 +152,59 @@ public sealed class RecognitionResult
     /// can still be linked by what the character looks like.
     /// </summary>
     public AppearanceSignature? Appearance { get; set; }
+
+    /// <summary>
+    /// Where on the source screenshot each recognised value came from.
+    ///
+    /// The review workspace draws these boxes over the capture, so a wrong
+    /// number can be traced to the pixels it was read from instead of only
+    /// showing up as a wrong number. Coordinates are in the submitted image's
+    /// pixel space (panel cropping already folded back in).
+    /// </summary>
+    public List<FieldRegion> Regions { get; set; } = new();
+}
+
+/// <summary>One box on a source screenshot that produced a recognised value.</summary>
+public sealed class FieldRegion
+{
+    /// <summary>Index of the image inside the recognised batch.</summary>
+    public int ScreenIndex { get; set; }
+
+    public ScreenKind Screen { get; set; }
+
+    /// <summary>Machine key: <c>hp</c>, <c>gold</c>, <c>nickname</c>, <c>item:金柳露</c> …</summary>
+    public string Key { get; set; } = string.Empty;
+
+    /// <summary>Label the UI puts on the box: 气血 / 金币 / 昵称 …</summary>
+    public string Label { get; set; } = string.Empty;
+
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
+
+    /// <summary>Raw OCR text inside the box, before any parsing.</summary>
+    public string RawText { get; set; } = string.Empty;
+
+    /// <summary>0.0 - 1.0 confidence for the box.</summary>
+    public double Confidence { get; set; }
+
+    /// <summary>Parsed value when the box carries a number.</summary>
+    public long? Value { get; set; }
+
+    /// <summary><c>field</c> | <c>identity</c> | <c>item</c> | <c>feature</c></summary>
+    public string Kind { get; set; } = FieldRegionKind.Field;
+
+    public bool IsFeature => Kind == FieldRegionKind.Feature;
+    public bool IsItem => Kind == FieldRegionKind.Item;
+}
+
+public static class FieldRegionKind
+{
+    public const string Field = "field";
+    public const string Identity = "identity";
+    public const string Item = "item";
+    public const string Feature = "feature";
 }
 
 /// <summary>One candidate the matcher considered for an unidentified capture.</summary>

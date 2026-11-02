@@ -1,3 +1,4 @@
+using CommunityToolkit.Mvvm.ComponentModel;
 using MhRecorder.Core.Models;
 
 namespace MhRecorder.Core.ViewModels;
@@ -50,10 +51,14 @@ public static class Fmt
         if (!string.IsNullOrWhiteSpace(gameId)) parts.Add($"游戏 ID {gameId}");
         return string.Join(" · ", parts);
     }
+
+    /// <summary>A field that was not read must render as "—", never as 0.</summary>
+    public static string ValueOrDash(AttributeValue? value) =>
+        value is null ? "—" : Number(value.Value);
 }
 
 /// <summary>One character card on the 角色管理 page (page_02).</summary>
-public sealed class CharacterCardViewModel : ObservableObject
+public sealed partial class CharacterCardViewModel : ObservableObject
 {
     public CharacterCardViewModel(CharacterDetail detail)
     {
@@ -73,18 +78,18 @@ public sealed class CharacterCardViewModel : ObservableObject
         HpText = $"{Fmt.Number(HpValue)} / {Fmt.Number(HpValue)}";
         MpText = $"{Fmt.Number(MpValue)} / {Fmt.Number(MpValue)}";
 
-        PhysicalDamage = Fmt.Number(stats.PhysicalDamage?.Value ?? 0);
-        MagicDamage = Fmt.Number(stats.MagicDamage?.Value ?? 0);
-        PhysicalDefense = Fmt.Number(stats.PhysicalDefense?.Value ?? 0);
-        MagicDefense = Fmt.Number(stats.MagicDefense?.Value ?? 0);
-        Speed = Fmt.Number(stats.Speed?.Value ?? 0);
-        HealingPower = Fmt.Number(stats.HealingPower?.Value ?? 0);
+        PhysicalDamage = Fmt.ValueOrDash(stats.PhysicalDamage);
+        MagicDamage = Fmt.ValueOrDash(stats.MagicDamage);
+        PhysicalDefense = Fmt.ValueOrDash(stats.PhysicalDefense);
+        MagicDefense = Fmt.ValueOrDash(stats.MagicDefense);
+        Speed = Fmt.ValueOrDash(stats.Speed);
+        HealingPower = Fmt.ValueOrDash(stats.HealingPower);
 
         var currencies = detail.Character.LatestCurrencies;
         GoldValue = currencies.Gold?.Value ?? 0;
         SilverValue = currencies.Silver?.Value ?? 0;
-        GoldText = Fmt.Number(GoldValue);
-        SilverText = Fmt.Number(SilverValue);
+        GoldText = Fmt.ValueOrDash(currencies.Gold);
+        SilverText = Fmt.ValueOrDash(currencies.Silver);
 
         var deltas = Services.CharacterDeltas.For(detail.Character.Id);
         GoldDeltaText = Fmt.Signed(deltas.Gold);
@@ -102,6 +107,7 @@ public sealed class CharacterCardViewModel : ObservableObject
     public long? Level { get; }
     public string? GameId { get; }
     public string AvatarInitial { get; }
+
     /// <summary>Base64 PNG of the portrait cropped from the screenshot, if any.</summary>
     public string? AvatarPngBase64 { get; }
     public string LevelText { get; }
@@ -132,18 +138,11 @@ public sealed class CharacterCardViewModel : ObservableObject
     public bool HasGoldDelta { get; }
     public bool HasSilverDelta { get; }
 
-    private bool _isCurrent;
     /// <summary>True for the raised card in the middle of the carousel.</summary>
-    public bool IsCurrent
-    {
-        get => _isCurrent;
-        set
-        {
-            if (!Set(ref _isCurrent, value)) return;
-            Raise(nameof(AvatarIsCircle));
-            Raise(nameof(CardScale));
-        }
-    }
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AvatarIsCircle))]
+    [NotifyPropertyChangedFor(nameof(CardScale))]
+    private bool _isCurrent;
 
     /// <summary>The focused card shows a round portrait tile; the neighbours show a square name tile.</summary>
     public bool AvatarIsCircle => IsCurrent;

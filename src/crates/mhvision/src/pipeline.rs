@@ -7,15 +7,18 @@ use crate::prelude::*;
 use crate::appearance::{appearance_signature, crop_rgba};
 use crate::classify::{classify_from_lines, classify_screen, locate_panel};
 use crate::extract::{
-    crop_avatar_png, crop_avatar_thumb, extract_character_score, extract_currencies, extract_equipment, extract_game_id,
-    extract_inventory, extract_level, extract_nickname, extract_school, extract_stats,
-    looks_like_bag, merge_adjacent_fragments,
+    avatar_geometry, crop_avatar_png, crop_avatar_thumb, extract_character_score, extract_currencies,
+    extract_equipment, extract_game_id, extract_inventory, extract_level, extract_nickname,
+    extract_school, extract_stats, looks_like_bag, merge_adjacent_fragments,
 };
 use crate::features::{extract_features, ImageFeatures};
 use crate::identity::{
     associate_by_evidence, decide_identity, resolve_identity, IdentityDecision, MatchPolicy,
 };
 use crate::ocr::OcrEngine;
+use crate::regions::{
+    build_regions, currency_specs, push_box_region, stat_specs, RegionSpec,
+};
 use crate::thumbnail::panel_thumb;
 // ---------------------------------------------------------------------------
 // Pipeline
@@ -64,7 +67,7 @@ impl RecognitionPipeline {
         let mut currency_merged = Currencies::default();
         let mut confidences: Vec<f64> = Vec::new();
 
-        for img in images {
+        for (screen_index, img) in images.iter().enumerate() {
             // 每张图之间是最自然的检查点：单张 OCR 一两秒，取消延迟最多一张。
             if control.cancelled() {
                 return Err(VisionError::Cancelled);
@@ -77,8 +80,14 @@ impl RecognitionPipeline {
             // panel before anything else looks at it. Everything below assumes
             // panel-only input; the HUD clock, chat and quest tracker otherwise
             // leak in as currency, inventory items and labels.
-            let cropped = locate_panel(img)
-                .and_then(|b| crop_rgba(img, b.x, b.y, b.width, b.height));
+            let panel = locate_panel(img);
+            let cropped = panel.and_then(|b| crop_rgba(img, b.x, b.y, b.width, b.height));
+            // OCR 坐标相对"裁切后的面板"，审核框画在"原始截图"上，所以要把裁掉
+            // 的左上角记下来加回去，否则所有框都会整体偏移一个面板位置。
+            let offset = match (&cropped, panel) {
+                (Some(_), Some(b)) => (b.x, b.y),
+                _ => (0, 0),
+            };
             let work: &image::RgbaImage = cropped.as_ref().unwrap_or(img);
 
             let lines = match self.engine.recognize(work) {
@@ -173,13 +182,84 @@ impl RecognitionPipeline {
             } else {
                 Vec::new()
             };
-            for item in items {
+            for item in &items {
                 if let Some(existing) =
                     result.inventory.iter_mut().find(|x| x.name == item.name)
                 {
                     existing.count += item.count;
                 } else {
-                    result.inventory.push(item);
+                    result.inventory.push(item.clone());
+                }
+            }
+
+            // ---- 审核框：每个值到底读的是截图上哪一块 ----
+            // 这一步只回填坐标，不参与识别结论；查不到框的字段会被跳过，所以
+            // 它不会让一次成功的识别失败。
+            {
+                let mut specs = stat_specs(&stats);
+                specs.extend(currency_specs(&currencies));
+
+                let game_id_here = extract_game_id(&lines);
+                if let Some((gid, _)) = &game_id_here {
+                    specs.push(RegionSpec::from_line(
+                        "game_id",
+                        "游戏ID",
+                        gid.clone(),
+                        None,
+                        FieldRegion::KIND_IDENTITY,
+                    ));
+                }
+                if let Some((level, _)) = extract_level(&lines) {
+                    specs.push(RegionSpec::from_line(
+                        "level",
+                        "等级",
+                        level.to_string(),
+                        Some(level),
+                        FieldRegion::KIND_IDENTITY,
+                    ));
+                }
+                if let Some(nickname) = extract_nickname(
+                    &lines,
+                    &stats,
+                    game_id_here.as_ref().map(|(gid, _)| gid.as_str()),
+                ) {
+                    specs.push(RegionSpec::from_line(
+                        "nickname",
+                        "昵称",
+                        nickname,
+                        None,
+                        FieldRegion::KIND_IDENTITY,
+                    ));
+                }
+                for item in &items {
+                    specs.push(RegionSpec::from_line(
+                        format!("item:{}", item.name),
+                        "物品",
+                        item.name.clone(),
+                        Some(item.count),
+                        FieldRegion::KIND_ITEM,
+                    ));
+                }
+
+                result.regions.extend(build_regions(&lines, screen_index, kind, offset, &specs));
+
+                // 头像不是 OCR 读出来的，但审核时要能看见"匹配时看的是这张脸"。
+                if let Some((ax, ay, size)) =
+                    avatar_geometry(&lines, work.width() as i32, work.height() as i32)
+                {
+                    push_box_region(
+                        &mut result.regions,
+                        screen_index,
+                        kind,
+                        offset,
+                        "feature:avatar",
+                        "头像",
+                        FieldRegion::KIND_FEATURE,
+                        ax,
+                        ay,
+                        size,
+                        size,
+                    );
                 }
             }
 

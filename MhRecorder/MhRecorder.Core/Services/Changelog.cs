@@ -5,14 +5,41 @@
 // and describe behaviour changes (recognition accuracy, UI rules), not just
 // internal refactors.
 
-namespace MhRecorder.App.Services;
+namespace MhRecorder.Core.Services;
 
-public sealed record ChangelogEntry(string Version, string Date, string[] Changes);
+/// <summary>
+/// 一个版本的更新记录。
+///
+/// 不用 record：WinUI 的 XamlTypeInfo 生成器会为 record 的 init-only 属性生成
+/// setter，编译直接失败（CS8852）。这里要一个"只有 getter"的普通类。
+/// </summary>
+public sealed class ChangelogEntry
+{
+    public ChangelogEntry(string version, string date, string[] changes)
+    {
+        Version = version;
+        Date = date;
+        Changes = changes;
+    }
+
+    public string Version { get; }
+    public string Date { get; }
+    public string[] Changes { get; }
+}
 
 public static class Changelog
 {
     public static readonly ChangelogEntry[] Entries =
     {
+        new("0.12.0", "2026-11-03", new[]
+        {
+            "界面：识别结果改为「审核工作区」——左边是可缩放平移的原图并在图上画出每个字段的 OCR 框，右边是字段表格（名称 / 可改的识别值 / 置信度 / 原始 OCR 文字），底部是身份关联。数字读错时能直接看到错在哪块像素上",
+            "界面：字段可以直接改。改过的值随本次记录入库，改错可一键还原为识别值；识别完成后自动选中置信度最低的字段，先看最可能错的那一项",
+            "界面：身份不明时把候选连同各自的匹配依据列出来，逐条确认或排除；排除干净后转为手动指定归属。确认过的身份会记回角色库，下次不再重复怀疑",
+            "界面：窗口不再锁死 1328×888。支持缩放与最大化，初始尺寸按工作区取（1366×768 也能完整显示），最小 1024×700；宽度不足时侧边栏收成图标条",
+            "界面：前端重构为完整 MVVM（CommunityToolkit.Mvvm）。录入、角色管理、资产、设置四页的业务逻辑从 code-behind 移到 ViewModel 与 Service，页面只负责绑定与视觉动画；新增设置项「导出 CSV」「完整备份」",
+            "协议：识别结果新增 regions（每个字段在截图上的像素框、OCR 原文与置信度），坐标已折算回原始截图；查不到框的字段不画框，不会指错位置",
+        }),
         new("0.11.0", "2026-11-03", new[]
         {
             "识别：特征算法改名纠错——原 compute_phash 实际是 dHash（9×8 相邻像素差分），名字误导了后续所有阈值讨论，现正名为 dHash",

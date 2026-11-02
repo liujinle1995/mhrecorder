@@ -37,6 +37,15 @@ public interface IAppService
 
     Task UpdateCharacterIdentityAsync(string id, string? nickname, string? gameId, long? level, CancellationToken ct = default);
 
+    /// <summary>
+    /// Mark a character's identity as verified by the user.
+    ///
+    /// The review workspace lets a human accept a candidate the matcher was not
+    /// sure about; recording that raises the row's confidence so the same doubt
+    /// is not raised again on every later capture.
+    /// </summary>
+    Task ConfirmCharacterAsync(string id, double confidence, CancellationToken ct = default);
+
     Task<CharacterDetail?> GetCharacterAsync(string id, CancellationToken ct = default);
 
     /// <summary>
@@ -53,4 +62,7 @@ public enum ExportFormat
     Json,
     Csv,
     Zip,
+
+    /// <summary>Restorable backup: data.json + a VACUUM INTO snapshot + manifest.</summary>
+    Backup,
 }

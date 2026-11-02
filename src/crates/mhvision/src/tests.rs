@@ -14,8 +14,8 @@ use crate::pipeline::*;
 use crate::thumbnail::*;
 use crate::types::*;
 use mhcore::{
-    AttributeValue, Character, CombatStats, Currencies, EvidenceKind, IdentityRef, IdentitySource,
-    PanelFingerprint, RecognitionResult, ScreenKind,
+    Character, CombatStats, Currencies, EvidenceKind, IdentityRef, IdentitySource,
+    PanelFingerprint, ScreenKind,
 };
 
 use crate::*;
@@ -936,4 +936,56 @@ fn character_score_survives_a_misread_label() {
     let merged = merge_adjacent_fragments(&lines);
     assert_eq!(merged.len(), 1, "气+血 must become one token");
     assert_eq!(merged[0].text, "气血");
+}
+
+/// 审核工作区的核心承诺：每个识别出来的字段都能指回截图上的一块像素。
+///
+/// 用真实截图上的 OCR 行坐标断言——框错了（比如把 气血 指到旁边 魔法 那一行）
+/// 比数字读错更难发现，所以这里逐行钉死 y。
+#[test]
+fn regions_point_at_the_box_that_produced_each_field() {
+    let lines = merge_adjacent_fragments(&[
+        OcrLine { text: "莫莫莫89级".into(), confidence: 0.99, rect: (399, 167, 98, 14) },
+        OcrLine { text: "ID".into(), confidence: 0.9, rect: (397, 194, 15, 13) },
+        OcrLine { text: "429277361".into(), confidence: 0.99, rect: (412, 194, 84, 13) },
+        OcrLine { text: "气血".into(), confidence: 0.94, rect: (640, 173, 50, 14) },
+        OcrLine { text: "5604/5604".into(), confidence: 0.99, rect: (791, 173, 71, 13) },
+        OcrLine { text: "魔法".into(), confidence: 0.99, rect: (638, 209, 53, 19) },
+        OcrLine { text: "2267/2267".into(), confidence: 0.99, rect: (792, 211, 68, 13) },
+        OcrLine { text: "物理伤害709".into(), confidence: 0.99, rect: (650, 388, 104, 14) },
+        OcrLine { text: "物理防御1609".into(), confidence: 0.99, rect: (794, 388, 111, 14) },
+        OcrLine { text: "法术伤害".into(), confidence: 0.99, rect: (649, 428, 72, 14) },
+        OcrLine { text: "441".into(), confidence: 0.99, rect: (716, 428, 38, 13) },
+        OcrLine { text: "法术防御1081".into(), confidence: 0.99, rect: (794, 428, 111, 14) },
+        OcrLine { text: "速度".into(), confidence: 0.99, rect: (648, 466, 72, 18) },
+        OcrLine { text: "1256".into(), confidence: 0.99, rect: (716, 468, 48, 13) },
+        OcrLine { text: "治疗强度133".into(), confidence: 0.99, rect: (794, 468, 102, 14) },
+    ]);
+
+    let stats = extract_stats(&lines);
+    let currencies = extract_currencies(&lines);
+    let mut specs = crate::regions::stat_specs(&stats);
+    specs.extend(crate::regions::currency_specs(&currencies));
+
+    let regions = crate::regions::build_regions(&lines, 0, ScreenKind::CharacterAttributes, (0, 0), &specs);
+    let at = |key: &str| {
+        regions
+            .iter()
+            .find(|r| r.key == key)
+            .unwrap_or_else(|| panic!("no region for {key}"))
+    };
+
+    assert_eq!(at("hp").y, 173, "气血 must point at its own row");
+    assert_eq!(at("mp").y, 211, "魔法 must point at its own row");
+    assert_eq!(at("physical_damage").y, 388);
+    assert_eq!(at("magic_damage").y, 428);
+    assert_eq!(at("physical_defense").y, 388);
+    assert_eq!(at("magic_defense").y, 428);
+    assert_eq!(at("speed").y, 468);
+    assert_eq!(at("healing_power").y, 468);
+
+    assert_eq!(at("hp").value, Some(5604));
+    assert_eq!(at("hp").raw_text, "5604/5604");
+    assert!(at("hp").confidence > 0.9);
+    assert!(!at("hp").label.is_empty());
 }

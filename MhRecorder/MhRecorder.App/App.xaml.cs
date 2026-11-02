@@ -2,7 +2,6 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using MhRecorder.App.Services;
-using MhRecorder.Core.Services;
 using Windows.UI;
 
 namespace MhRecorder.App;
@@ -34,7 +33,7 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        AppServices.Initialize();
+        AppHost.Initialize();
 
         _window = new MainWindow();
         _window.Activate();

@@ -5,32 +5,36 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using MhRecorder.App.Services;
 using MhRecorder.App.Views;
+using MhRecorder.Core.Infrastructure;
+using MhRecorder.Core.ViewModels;
 using Windows.Graphics;
 using Windows.UI;
-using WinRT.Interop;
 
 namespace MhRecorder.App;
 
 public sealed partial class MainWindow : Window
 {
     // Size taken from the design mock: the window body inside design/page_01.png
-    // measures 2766 x 1850 px at 2.0836 px/pt, i.e. 1328 x 888 logical units
-    // (ratio 1.495). An earlier 1320x940 (ratio 1.404) was too tall, which is
-    // why the layout did not match the mock.
-    private const int DefaultWidth = 1328;
-    private const int DefaultHeight = 888;
+    // measures 2766 x 1850 px at 2.0836 px/pt, i.e. 1328 x 888 logical units.
+    private const int DesignWidth = 1328;
+    private const int DesignHeight = 888;
 
-    // The UI is only pixel-accepted at the design size and has no responsive
-    // re-flow, so the window is fixed: no maximise, no free resize. A small
-    // tolerance keeps it visually stable on high-DPI displays.
-    private const int MinWidth = 1328;
-    private const int MinHeight = 888;
-    private const int MaxWidth = 1328;
-    private const int MaxHeight = 888;
+    // Below this the three-column pages stop being readable, so it is a hard
+    // floor rather than a suggestion. 1024x700 still fits a 1366x768 laptop
+    // with the taskbar and window chrome accounted for.
+    private const int MinWidth = 1024;
+    private const int MinHeight = 700;
+
+    // Sidebar collapses to icons so the content keeps its width on small screens.
+    private const double CompactBreakpoint = 1180;
+    private const double SidebarWidth = 254;
+    private const double SidebarCompactWidth = 76;
 
     private Button[] _navButtons = Array.Empty<Button>();
     private TextBlock[] _navTexts = Array.Empty<TextBlock>();
     private TextBlock[] _navIcons = Array.Empty<TextBlock>();
+
+    public MainViewModel ViewModel { get; } = AppHost.Shell;
 
     public MainWindow()
     {
@@ -41,66 +45,62 @@ public sealed partial class MainWindow : Window
         SetTitleBar(AppTitleBar);
 
         ConfigureWindow();
-
-        // AppWindow.Resize issues made too early can be overridden while the
-        // window is still being realised, which left the frame at a default
-        // 885x592. Re-assert the design size once the window has actually been
-        // activated and the presenter exists.
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
-        {
-            ApplyDesignSize();
-        });
-
-        // WinUI re-derives the frame during activation, so assert the size a
-        // couple more times early in the window's life before locking it.
-        Activated += (_, _) => ApplyDesignSize();
-        _ = ReapplySizeSequenceAsync();
-
-        // WinUI can still re-apply a default frame during the first activation
-        // pass, so re-assert the design size once the window is really shown.
-        Activated += (_, _) =>
-        {
-            ApplyDesignSize();
-            LockToDesignSize();
-        };
+        ApplyInitialSize();
 
         _navButtons = new[] { NavImport, NavCharacters, NavAssets, NavSettings };
         _navTexts = new[] { NavImportText, NavCharactersText, NavAssetsText, NavSettingsText };
         _navIcons = new[] { NavImportIcon, NavCharactersIcon, NavAssetsIcon, NavSettingsIcon };
 
-        ContentFrame.Navigated += (_, _) => SyncNavSelection();
-        Select(0);
+        // The shell decides which page is current; the frame follows it.
+        ViewModel.NavigationRequested += (_, page) => NavigateFrame(page);
+        ViewModel.PropertyChanged += (_, e) =>
+        {
+            switch (e.PropertyName)
+            {
+                case nameof(MainViewModel.Current):
+                    ApplyNavState();
+                    break;
+                case nameof(MainViewModel.BackendBadge):
+                    BackendBadge.Text = ViewModel.BackendBadge;
+                    break;
+                case nameof(MainViewModel.FooterStatus):
+                    FooterStatusText.Text = ViewModel.FooterStatus;
+                    break;
+                case nameof(MainViewModel.FooterSnapshot):
+                    FooterSnapshotText.Text = ViewModel.FooterSnapshot;
+                    break;
+            }
+        };
 
-        UpdateBackendStatus();
-        AppServices.Changed += (_, _) => UiThread.OnUi(UpdateBackendStatus);
+        BackendBadge.Text = ViewModel.BackendBadge;
+        FooterStatusText.Text = ViewModel.FooterStatus;
+        FooterSnapshotText.Text = ViewModel.FooterSnapshot;
 
-        UpdateFooter();
+        RootLayout.SizeChanged += (_, e) => ApplyResponsiveLayout(e.NewSize.Width);
+
+        NavigateFrame(AppPage.Import);
+        ApplyNavState();
 
         AppWindow.Closing += (_, _) => App.Log("MainWindow closing");
     }
+
+    // ---------------- window sizing ----------------
 
     private void ConfigureWindow()
     {
         try
         {
-            ApplyDesignSize();
-
-            // Pin the window to the design size: disabling every resize path on
-            // the presenter is what actually removes the maximise button and
-            // stops the user dragging the frame.
-            //
-            // NOTE: do NOT also set PreferredMinimum/MaximumWidth/Height here.
-            // Those are evaluated in the window's DPI context and clamped the
-            // window to a bogus 885x592 footprint, ignoring the Resize call.
-            // IsResizable=false alone locks the size.
+            // The design size is a starting point, not a cage: forcing 1328x888
+            // made the app unusable on 1366x768 and on high-DPI laptops, where the
+            // window came out larger than the work area. Resizing and maximise
+            // are enabled; the minimum below is what protects the layout.
             if (AppWindow.Presenter is OverlappedPresenter presenter)
             {
-                presenter.IsResizable = false;
-                presenter.IsMaximizable = false;
-                presenter.IsMinimizable = true; // minimising is harmless
+                presenter.IsResizable = true;
+                presenter.IsMaximizable = true;
+                presenter.IsMinimizable = true;
             }
 
-            // Custom title bar is drawn in XAML; drop the system caption buttons area tint.
             AppWindow.TitleBar.ExtendsContentIntoTitleBar = true;
             AppWindow.TitleBar.ButtonBackgroundColor = Colors.Transparent;
             AppWindow.TitleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
@@ -115,67 +115,100 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void UpdateBackendStatus()
-    {
-        var remote = AppServices.Instance.IsRemote;
-        BackendBadge.Text = remote ? "已连接离线识别引擎" : "离线演示数据";
-        FooterStatusText.Text = remote
-            ? "已离线运行 · 已连接本地识别引擎"
-            : "已离线运行 · 数据存于本地 JSON";
-    }
-
-    internal void UpdateFooter()
+    /// <summary>
+    /// Start at the design size when the screen allows it, otherwise at the
+    /// largest size that still fits the work area — never larger than the screen.
+    /// </summary>
+    private void ApplyInitialSize()
     {
         try
         {
-            var summary = AppServices.LastStatistics?.Summary;
-            FooterSnapshotText.Text = summary is null
-                ? "最近资产快照：今天 14:32"
-                : $"最近资产快照：今天 14:32";
+            var scale = GetDpiScale();
+            var work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+
+            // WorkArea is in physical pixels; the design constants are logical.
+            var availableW = work.Width / scale;
+            var availableH = work.Height / scale;
+
+            var width = Math.Min(DesignWidth, Math.Max(MinWidth, availableW - 40));
+            var height = Math.Min(DesignHeight, Math.Max(MinHeight, availableH - 40));
+
+            var physicalW = (int)Math.Round(width * scale);
+            var physicalH = (int)Math.Round(height * scale);
+            var x = work.X + (work.Width - physicalW) / 2;
+            var y = work.Y + (work.Height - physicalH) / 2;
+
+            // SetWindowPos takes raw physical pixels; AppWindow.Resize divides by
+            // the scale factor and cannot express this size reliably.
+            SetWindowPos(WinRT.Interop.WindowNative.GetWindowHandle(this), IntPtr.Zero,
+                x, y, physicalW, physicalH, SwpNoZOrder | SwpNoActivate);
+
+            // Minimum size is enforced by the presenter, so the user cannot drag
+            // the layout into a state that no longer fits its content. These are
+            // applied after the size is set: doing it before made WinUI clamp the
+            // frame to its stale default.
+            if (AppWindow.Presenter is OverlappedPresenter presenter)
+            {
+                presenter.PreferredMinimumWidth = (int)Math.Round(MinWidth * scale);
+                presenter.PreferredMinimumHeight = (int)Math.Round(MinHeight * scale);
+            }
+
+            App.Log($"window size {width}x{height} (work {availableW:0}x{availableH:0}, scale {scale:0.##})");
         }
         catch (Exception ex)
         {
-            App.Log($"UpdateFooter failed: {ex.Message}");
+            App.Log($"ApplyInitialSize failed: {ex.Message}");
         }
     }
 
-    private void Select(int index)
+    /// <summary>Collapse the sidebar to icons when the content needs the width.</summary>
+    private void ApplyResponsiveLayout(double width)
     {
-        switch (index)
-        {
-            case 0: Navigate(typeof(ImportPage)); break;
-            case 1: Navigate(typeof(CharactersPage)); break;
-            case 2: Navigate(typeof(AssetsPage)); break;
-            case 3: Navigate(typeof(SettingsPage)); break;
-        }
-        ApplyNavState(index);
+        var compact = width < CompactBreakpoint;
+        if (compact == ViewModel.IsSidebarCompact) return;
+
+        ViewModel.IsSidebarCompact = compact;
+        SidebarColumn.Width = new GridLength(compact ? SidebarCompactWidth : SidebarWidth);
+        SidebarCaption.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+
+        foreach (var text in _navTexts)
+            text.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+
+        NavImport.Padding = compact ? new Thickness(0) : new Thickness(14, 0, 14, 0);
+        NavCharacters.Padding = NavImport.Padding;
+        NavAssets.Padding = NavImport.Padding;
+        NavSettings.Padding = NavImport.Padding;
+
+        foreach (var button in _navButtons)
+            button.HorizontalContentAlignment =
+                compact ? HorizontalAlignment.Center : HorizontalAlignment.Stretch;
     }
 
-    private void Navigate(Type pageType)
-    {
-        if (ContentFrame.CurrentSourcePageType == pageType) return;
-        ContentFrame.Navigate(pageType);
-    }
+    // ---------------- navigation ----------------
 
-    private void SyncNavSelection()
+    private void NavigateFrame(AppPage page)
     {
-        var current = ContentFrame.CurrentSourcePageType;
-        var index = current switch
+        var target = page switch
         {
-            _ when current == typeof(ImportPage) => 0,
-            _ when current == typeof(CharactersPage) => 1,
-            _ when current == typeof(AssetsPage) => 2,
-            _ when current == typeof(SettingsPage) => 3,
-            _ => 0,
+            AppPage.Characters => typeof(CharactersPage),
+            AppPage.Assets => typeof(AssetsPage),
+            AppPage.Settings => typeof(SettingsPage),
+            _ => typeof(ImportPage),
         };
-        ApplyNavState(index);
+
+        if (ContentFrame.CurrentSourcePageType != target) ContentFrame.Navigate(target);
+        ApplyNavState();
     }
 
-    private void ApplyNavState(int index)
+    /// <summary>Public hook for code that only knows the numeric index.</summary>
+    public void NavigateTo(int index) => ViewModel.Select((AppPage)index);
+
+    private void ApplyNavState()
     {
+        var current = ViewModel.Current;
         for (var i = 0; i < _navButtons.Length; i++)
         {
-            var selected = i == index;
+            var selected = (AppPage)i == current;
             _navButtons[i].Background = selected
                 ? Theme.Resource("NavSelectedBrush", new SolidColorBrush(Color.FromArgb(255, 0xE2, 0xE2, 0xE7)))
                 : new SolidColorBrush(Colors.Transparent);
@@ -196,90 +229,11 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void OnNavImportClick(object sender, RoutedEventArgs e) => Select(0);
-    private void OnNavCharactersClick(object sender, RoutedEventArgs e) => Select(1);
-    private void OnNavAssetsClick(object sender, RoutedEventArgs e) => Select(2);
-    private void OnNavSettingsClick(object sender, RoutedEventArgs e) => Select(3);
+    private void OnNavImportClick(object sender, RoutedEventArgs e) => ViewModel.Select(AppPage.Import);
+    private void OnNavCharactersClick(object sender, RoutedEventArgs e) => ViewModel.Select(AppPage.Characters);
+    private void OnNavAssetsClick(object sender, RoutedEventArgs e) => ViewModel.Select(AppPage.Assets);
+    private void OnNavSettingsClick(object sender, RoutedEventArgs e) => ViewModel.Select(AppPage.Settings);
 
-    /// <summary>Public hook so pages can jump (e.g. after saving a recognition).</summary>
-    /// <summary>
-    /// Resize and centre the window at the design size.
-    ///
-    /// `AppWindow.Resize` takes PHYSICAL pixels, so a 150% display needs
-    /// 1328*1.5 = 1992 px to look like the 1328-unit mock. Passing the logical
-    /// number straight through is what previously produced a 590x395 footprint
-    /// (1328/1.5 = 885 px physical).
-    /// </summary>
-    private void ApplyDesignSize()
-    {
-        try
-        {
-            var scale = GetDpiScale();
-            var physicalW = (int)Math.Round(DefaultWidth * scale);
-            var physicalH = (int)Math.Round(DefaultHeight * scale);
-
-            // AppWindow.Resize converts DIPs -> physical by DIVIDING by the
-            // scale factor (Resize(1328) on a 150% display produced 885 px),
-            // so it cannot express the design size. SetWindowPos takes raw
-            // physical pixels and is the only reliable route here.
-            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-            var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary);
-            var work = area.WorkArea;
-            var x = work.X + (work.Width - physicalW) / 2;
-            var y = work.Y + (work.Height - physicalH) / 2;
-            var ok = SetWindowPos(hwnd, IntPtr.Zero, x, y, physicalW, physicalH,
-                SwpNoZOrder | SwpNoActivate);
-            App.Log($"ApplyDesignSize scale={scale:0.##} physical={physicalW}x{physicalH} ok={ok}");
-        }
-        catch (Exception ex)
-        {
-            App.Log($"ApplyDesignSize failed: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Re-assert the design size a few times while the window settles.
-    ///
-    /// WinUI applies its own default frame shortly after creation, which
-    /// overwrites a single early resize. Re-applying at short intervals (then
-    /// locking the presenter) makes the final geometry deterministic.
-    /// </summary>
-    private async Task ReapplySizeSequenceAsync()
-    {
-        foreach (var delay in new[] { 120, 350, 800 })
-        {
-            await Task.Delay(delay);
-            ApplyDesignSize();
-        }
-        LockToDesignSize();
-    }
-
-    /// <summary>
-    /// Remove the maximise button and stop frame resizing.
-    ///
-    /// Called after the design size is applied, because setting these before
-    /// (or during) the resize makes WinUI clamp the frame to its stale size.
-    /// </summary>
-    private bool _locked;
-    private void LockToDesignSize()
-    {
-        if (_locked) return;
-        try
-        {
-            if (AppWindow.Presenter is OverlappedPresenter presenter)
-            {
-                presenter.IsResizable = false;
-                presenter.IsMaximizable = false;
-                presenter.IsMinimizable = true;
-            }
-            _locked = true;
-            App.Log("window locked to design size");
-        }
-        catch (Exception ex)
-        {
-            App.Log($"LockToDesignSize failed: {ex.Message}");
-        }
-    }
     private const uint SwpNoZOrder = 0x0004;
     private const uint SwpNoActivate = 0x0010;
 
@@ -287,14 +241,7 @@ public sealed partial class MainWindow : Window
     private static extern bool SetWindowPos(
         IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
 
-    public void NavigateTo(int index) => Select(index);
-
-    /// <summary>
-    /// DPI scale factor of the monitor this window is on (1.0 = 96 DPI).
-    ///
-    /// `AppWindow.Resize` takes physical pixels while our layout constants are
-    /// logical units, so every size must be multiplied by this.
-    /// </summary>
+    /// <summary>DPI scale factor of the monitor this window is on (1.0 = 96 DPI).</summary>
     private double GetDpiScale()
     {
         try

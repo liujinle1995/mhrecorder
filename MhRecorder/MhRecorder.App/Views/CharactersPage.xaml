@@ -32,7 +32,7 @@
         <StackPanel Grid.Row="0" Spacing="6">
             <TextBlock Text="角色管理" Style="{StaticResource PageTitleText}" />
             <TextBlock x:Name="SubtitleText"
-                       Text="导入的角色都会在这里以卡片呈现，共 5 个角色 · 最近导入 今天 14:32"
+                       Text="{x:Bind ViewModel.Subtitle, Mode=OneWay}"
                        Style="{StaticResource PageSubtitleText}" />
         </StackPanel>
 
@@ -46,9 +46,9 @@
 
             <TextBox x:Name="SearchBox" Grid.Column="0" Width="300"
                      Style="{StaticResource SearchTextBoxStyle}"
-                     PlaceholderText="搜索角色昵称"
+                     PlaceholderText="搜索角色昵称 / 游戏 ID"
                      AutomationProperties.AutomationId="CharacterSearchBox"
-                     TextChanged="OnSearchTextChanged" />
+                     Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
             <Button x:Name="NewCharacterButton" Grid.Column="2"
                     AutomationProperties.AutomationId="NewCharacterButton"

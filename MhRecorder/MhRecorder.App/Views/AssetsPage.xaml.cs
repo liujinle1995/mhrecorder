@@ -10,7 +10,12 @@ using Windows.UI;
 
 namespace MhRecorder.App.Views;
 
-/// <summary>Page 3 — 资产统计: three summary cards plus the two grouped bar charts.</summary>
+/// <summary>
+/// Page 3 — 资产统计: three summary cards plus the two grouped bar charts.
+///
+/// 数字与环比来自 <see cref="AssetsViewModel"/>；这里只算"柱子画在哪"——那部分
+/// 是纯像素计算，换成别的方式呈现（换成折线、改成表）时只该动这个文件。
+/// </summary>
 public sealed partial class AssetsPage : Page
 {
     private static readonly SolidColorBrush GoldBrush = new(Color.FromArgb(255, 0xF6, 0xB8, 0x2B));
@@ -19,7 +24,9 @@ public sealed partial class AssetsPage : Page
     private static readonly SolidColorBrush TextTertiary = new(Color.FromArgb(255, 0x9A, 0xA0, 0xA6));
     private static readonly SolidColorBrush BrandBlue = new(Color.FromArgb(255, 0x00, 0x74, 0xFF));
 
-    private StatisticsPayload _payload = new();
+    public AssetsViewModel ViewModel { get; } = AppHost.Assets;
+
+    private StatisticsPayload Payload => ViewModel.Payload;
 
     public AssetsPage()
     {
@@ -31,29 +38,15 @@ public sealed partial class AssetsPage : Page
     {
         try
         {
-            _payload = await AppServices.Instance.GetStatisticsAsync(5);
-            AppServices.LastStatistics = _payload;
-            ApplySummary();
+            await ViewModel.LoadAsync(5);
+            AppHost.Shell.SetFooterSnapshot(
+                $"最近资产快照：{ViewModel.CharacterCountText} 个角色 · 金币 {ViewModel.GoldTotalText}");
             RedrawAll();
         }
         catch (Exception ex)
         {
             App.Log($"AssetsPage.OnLoaded failed: {ex}");
         }
-    }
-
-    private void ApplySummary()
-    {
-        var summary = _payload.Summary;
-        GoldTotalText.Text = Fmt.Number(summary.GoldTotal);
-        SilverTotalText.Text = Fmt.Number(summary.SilverTotal);
-        CharacterCountText.Text = Fmt.Number(summary.CharacterCount);
-
-        GoldChangeText.Text = summary.GoldChangePercent is { } g ? Fmt.Percent(g) : "—";
-        SilverChangeText.Text = summary.SilverChangePercent is { } s ? Fmt.Percent(s) : "—";
-        CharacterChangeText.Text = summary.CharacterChange is { } c && c != 0
-            ? $"{c:+0;-0} 个"
-            : "—";
     }
 
     private void RedrawAll()
@@ -70,7 +63,7 @@ public sealed partial class AssetsPage : Page
     private void DrawCharacterChart()
     {
         CharacterChartCanvas.Children.Clear();
-        if (_payload.Characters.Count == 0) return;
+        if (Payload.Characters.Count == 0) return;
 
         var width = CharacterChartCanvas.ActualWidth;
         var height = CharacterChartCanvas.ActualHeight;
@@ -79,15 +72,15 @@ public sealed partial class AssetsPage : Page
         var labelAreaHeight = 46;   // avatar + nickname below the bars
         var valueAreaHeight = 22;   // numbers above the bars
         var plotHeight = Math.Max(40, height - labelAreaHeight - valueAreaHeight);
-        var maxValue = _payload.Characters.Max(c => Math.Max(c.GoldWan, c.SilverWan));
+        var maxValue = Payload.Characters.Max(c => Math.Max(c.GoldWan, c.SilverWan));
         if (maxValue <= 0) maxValue = 1;
 
-        var groups = _payload.Characters.Count;
+        var groups = Payload.Characters.Count;
         var slotWidth = width / groups;
 
         for (var i = 0; i < groups; i++)
         {
-            var item = _payload.Characters[i];
+            var item = Payload.Characters[i];
             var slotLeft = i * slotWidth;
             var center = slotLeft + slotWidth / 2;
 
@@ -163,7 +156,7 @@ public sealed partial class AssetsPage : Page
     private void DrawRecentChart()
     {
         RecentChartCanvas.Children.Clear();
-        var recent = _payload.Recent;
+        var recent = Payload.Recent;
         if (recent.Count == 0) return;
 
         var width = RecentChartCanvas.ActualWidth;

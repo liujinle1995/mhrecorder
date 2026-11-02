@@ -85,8 +85,61 @@ public sealed class FakeAppService : IAppService
             IdentitySource = IdentitySource.IdField,
             ScreenshotCount = screenshotCount,
             CacheHits = new List<string>(),
+            // 演示模式也要能看审核工作区：没有后端时这些框让"点字段→高亮区域"
+            // 依然可用，否则审核页在离线演示下是一片空图。
+            Regions = DemoRegions(),
+            IdentityEvidence = "游戏ID 429277013 直接读取自人物属性面板",
+            Appearance = new AppearanceSignature
+            {
+                HairName = "深蓝",
+                HairRgb = new[] { 44, 62, 108 },
+                WeaponName = "青碧",
+                WeaponRgb = new[] { 90, 190, 170 },
+            },
         };
     }
+
+    /// <summary>Plausible boxes for a 1265x711 人物属性 capture.</summary>
+    private static List<FieldRegion> DemoRegions() => new()
+    {
+        Region("nickname", "昵称", 399, 167, 90, 16, "海淘淘", null, FieldRegionKind.Identity),
+        Region("level", "等级", 505, 167, 44, 14, "89级", 89, FieldRegionKind.Identity),
+        Region("game_id", "游戏ID", 412, 194, 84, 13, "429277013", null, FieldRegionKind.Identity),
+        Region("hp", "气血", 791, 173, 71, 13, "7,721/7,721", 7721, FieldRegionKind.Field),
+        Region("mp", "魔法", 792, 211, 68, 13, "2,215/2,215", 2215, FieldRegionKind.Field),
+        Region("physical_damage", "物伤", 650, 388, 104, 14, "物理伤害758", 758, FieldRegionKind.Field),
+        Region("physical_defense", "物防", 794, 388, 111, 14, "物理防御1714", 1714, FieldRegionKind.Field),
+        Region("magic_damage", "法伤", 649, 428, 72, 14, "法术伤害582", 582, FieldRegionKind.Field),
+        Region("magic_defense", "法防", 794, 428, 111, 14, "法术防御948", 948, FieldRegionKind.Field),
+        Region("speed", "速度", 716, 468, 48, 13, "892", 892, FieldRegionKind.Field),
+        Region("healing_power", "治疗强度", 794, 468, 102, 14, "治疗强度408", 408, FieldRegionKind.Field),
+        Region("gold", "金币", 700, 604, 82, 14, "2,942,685", 2942685, FieldRegionKind.Field),
+        Region("silver", "银币", 900, 604, 92, 14, "14,297,169", 14297169, FieldRegionKind.Field),
+        new FieldRegion
+        {
+            ScreenIndex = 0, Screen = ScreenKind.CharacterAttributes,
+            Key = "feature:avatar", Label = "头像",
+            X = 289, Y = 150, Width = 66, Height = 60,
+            Confidence = 1.0, Kind = FieldRegionKind.Feature,
+        },
+    };
+
+    private static FieldRegion Region(string key, string label, int x, int y, int w, int h,
+        string raw, long? value, string kind) => new()
+    {
+        ScreenIndex = 0,
+        Screen = ScreenKind.CharacterAttributes,
+        Key = key,
+        Label = label,
+        X = x,
+        Y = y,
+        Width = w,
+        Height = h,
+        RawText = raw,
+        Confidence = 0.96,
+        Value = value,
+        Kind = kind,
+    };
 
     private static AttributeValue Attr(long value, double confidence, string raw) =>
         new() { Value = value, Confidence = confidence, RawText = raw };
@@ -128,7 +181,7 @@ public sealed class FakeAppService : IAppService
             id = existing.Id;
         }
 
-        return Task.FromResult(id);
+        return Task.FromResult<string?>(id);
     }
 
     // ------------------------------------------------------------------
@@ -208,6 +261,20 @@ public sealed class FakeAppService : IAppService
             if (level is not null) match.Level = level;
             match.IdentityConfirmed = true;
             match.IdentityConfidence = 1.0;
+            match.UpdatedAt = Now();
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task ConfirmCharacterAsync(string id, double confidence, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        lock (_lock)
+        {
+            var match = _characters.FirstOrDefault(c => c.Id == id);
+            if (match is null) return Task.CompletedTask;
+            match.IdentityConfirmed = true;
+            match.IdentityConfidence = Math.Clamp(confidence, 0.0, 1.0);
             match.UpdatedAt = Now();
         }
         return Task.CompletedTask;

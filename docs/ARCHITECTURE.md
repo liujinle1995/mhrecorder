@@ -21,8 +21,8 @@ D:\app\mhrecorder
 │     ├─ mhservice\   命名管道服务端 + 分发
 │     └─ mhcli\       独立测试 CLI（后端可脱离 UI 测试）
 └─ MhRecorder\        C# 解决方案
-   ├─ MhRecorder.Core\  模型 + 管道客户端
-   └─ MhRecorder.App\   WinUI 3 界面
+   ├─ MhRecorder.Core\  模型 + 协议 + 服务 + ViewModel（不引用 WinUI）
+   └─ MhRecorder.App\   WinUI 3 界面（页面 / 控件 / 平台适配）
 ```
 
 ## 构建
@@ -89,6 +89,95 @@ OpenCV 4.12 world 已 vendor，ONNX Runtime 1.31.1 已 vendor（`ort` 用 `load-
 
 `CharacterDetail` 形如 `{"character":Character,"snapshotCount":3,"lastRecordedAt":123456}`。
 所有 JSON 字段均为 camelCase，与 `mhcore` 的 serde 配置一致。
+
+## 前端分层（MVVM）
+
+页面不再承担业务逻辑。分层是硬边界，不是建议：
+
+```
+MhRecorder.Core/                 不引用 WinUI，可脱离界面编译 / 测试
+├─ Models.cs                     领域模型镜像（与 mhcore 一一对应）
+├─ NamedPipeClient.cs            协议传输
+├─ Services/
+│  ├─ IAppService.cs             协议门面（Remote / Fake 两个实现）
+│  ├─ BackendService.cs          当前用哪个后端 + 连接状态 + 重连
+│  ├─ ImageImportService.cs      文件 / 剪贴板 / 窗口截图的归一化
+│  ├─ RecognitionService.cs      识别 → 判定可用 → 归属 → 保存 → 回填身份
+│  ├─ CharacterService.cs        角色库读写 + 搜索规则
+│  ├─ ExportService.cs           导出 / 完整备份 + 选路径
+│  └─ Changelog.cs               版本记录（release.ps1 从这里抽正文）
+├─ Infrastructure/
+│  ├─ NavigationService.cs       INavigationService + AppPage（外壳只认这个）
+│  └─ DialogService.cs           IDialogService / IWindowPicker（问用户一句）
+└─ ViewModels/                   CommunityToolkit.Mvvm（源生成器）
+   ├─ ImportViewModel.cs         录入 + 审核工作区
+   ├─ CharactersViewModel.cs     角色列表 / 搜索 / 翻页 / 删除
+   ├─ AssetsViewModel.cs         资产汇总 + 环比文案
+   ├─ SettingsViewModel.cs       设置 / 引擎信息 / 导出 / 备份
+   ├─ MainViewModel.cs           外壳导航与状态栏
+   ├─ CharacterCardViewModel.cs  卡片投影
+   └─ FieldRowViewModel.cs       审核表格的一行（可改、可还原）
+
+MhRecorder.App/                  只做"画"和"把平台能力接进来"
+├─ Views/*.xaml(.cs)             绑定 + 手势 + 图表/轮播等视觉计算
+├─ Views/Dialogs/                ContentDialog 子类（更新记录 / 窗口选择）
+├─ Controls/ZoomableImageView    可缩放平移的截图 + OCR 框叠层
+├─ Controls/CharacterCardView    角色卡片（UserControl，Border 是 sealed）
+├─ Platform/                     WinUI 实现：文件选择器、剪贴板、窗口截图
+└─ Services/AppHost.cs           组合根：唯一 new 服务与 ViewModel 的地方
+```
+
+约束（改代码前先看这几条）：
+
+1. **Core 不得 `using Microsoft.UI.*`**。需要平台能力就加接口（`IImageSource`、
+   `IFileSaveTarget`、`IDialogService`、`IWindowPicker`），在 `App/Platform` 实现。
+2. **ViewModel 不发 UI 通知**：不 new 控件、不弹窗、不碰 `XamlRoot`。
+3. **页面不写业务判断**：能不能保存、改过的值怎么入库、身份不明要不要拦，都在 VM。
+4. 视觉计算（轮播三张卡的位置、柱状图坐标、缩放平移）留在视图，那是"怎么画"。
+
+调试开关（仅开发用）：
+
+| 环境变量 | 作用 |
+|---|---|
+| `MH_FORCE_DEMO=1` | 忽略命名管道，强制用内存演示后端 |
+| `MH_DEMO_IMAGE=<png>` | 演示模式下把这张截图垫在识别结果下面，便于调审核界面 |
+
+## 识别审核工作区
+
+识别结果里每个值都带一个像素框，前端据此把"数字错了"变成"这块像素读错了"。
+
+`RecognitionResult.regions[]`（`mhcore::FieldRegion`）：
+
+| 字段 | 含义 |
+|---|---|
+| `screenIndex` / `screen` | 属于批次里第几张图、哪类面板 |
+| `key` | `hp` / `gold` / `nickname` / `item:金柳丹` / `feature:avatar` |
+| `label` | 界面上的中文名（气血 / 金币 …） |
+| `x,y,width,height` | 原图像素坐标（面板裁切偏移已加回） |
+| `rawText` / `confidence` / `value` | 该框里的 OCR 原文、置信度、解析值 |
+| `kind` | `field` / `identity` / `item` / `feature` |
+
+坐标由 `mhvision::regions` 用字段的 `rawText` 反查 OCR 行得到——不是重新猜位置，
+所以查不到就不画框，不会画错位置。前端 `ZoomableImageView` 按 1 像素 = 1 DIP
+铺开图片与叠加层，缩放/平移只作用于外层变换，因此像素坐标可以直接当布局坐标用。
+
+交互约定：
+
+- 选中字段行 → 查看器缩放到该框（整图 27% 缩放下看不清数字，这是必须的）。
+- 点图上的框 → 选中表格对应行并滚到可见。
+- 识别完成后自动选中**置信度最低**的字段，先看最可能错的那一项。
+- 缩放到 55% 以下隐藏框标签，只留框，避免标签糊成一团。
+
+## 窗口尺寸策略
+
+| 场景 | 行为 |
+|---|---|
+| 常规桌面 | 按设计稿 1328×888 逻辑像素 |
+| 小屏 / 工作区不足 | 取工作区 − 40 后的较大者，永不超出工作区 |
+| 最小尺寸 | 1024×700（再小内容就挤不下，用 presenter 钳住） |
+| 用户缩放 / 最大化 | 允许；内容按星号比例与 MinWidth 自适应 |
+| 宽度 < 1180 | 侧边栏收成 76px 图标条，隐藏导航文字 |
+| 高 DPI | 所有物理像素换算走 `GetDpiForWindow`，用 `SetWindowPos` 而非 `AppWindow.Resize` |
 
 ## 设计令牌（从设计稿采样）
 

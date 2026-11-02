@@ -76,7 +76,7 @@ function Invoke-GitHub {
 
 # 从 Changelog.cs 抽取当前版本的条目，作为 release 正文
 function Get-ReleaseNotes {
-    $cl = Join-Path $root 'MhRecorder\MhRecorder.App\Services\Changelog.cs'
+    $cl = Join-Path $root 'MhRecorder\MhRecorder.Core\Services\Changelog.cs'
     if (-not (Test-Path -LiteralPath $cl)) { return '' }
     $text = Get-Content -LiteralPath $cl -Raw
     $pat = 'new\("' + [regex]::Escape($AppVersion) + '",\s*"([^"]+)",\s*new\[\]\s*\{(.*?)\}\s*\)'

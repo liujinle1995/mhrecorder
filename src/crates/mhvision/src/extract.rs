@@ -218,8 +218,11 @@ pub(crate) fn strip_label<'a>(text: &'a str, _label: &str) -> &'a str {
 /// We therefore seed a square from the ID box, then verify it really looks like
 /// a portrait (high colour variance inside, low variance on the border ring).
 /// If the check fails we return `None` rather than shipping a wrong crop.
-pub(crate) fn crop_avatar(img: &image::RgbaImage, lines: &[OcrLine]) -> Option<image::RgbaImage> {
-    let (w, h) = (img.width() as i32, img.height() as i32);
+///
+/// Returns `(x, y, size)` in image pixels, or `None` when no plausible portrait
+/// square can be derived from this panel.
+pub(crate) fn avatar_geometry(lines: &[OcrLine], img_w: i32, img_h: i32) -> Option<(i32, i32, i32)> {
+    let (w, h) = (img_w, img_h);
 
     // Anchor: the "ID" token (or the line that carries the numeric game id).
     let anchor = lines
@@ -287,10 +290,15 @@ pub(crate) fn crop_avatar(img: &image::RgbaImage, lines: &[OcrLine]) -> Option<i
         return None;
     }
 
-    let (x, y, s) = (left.round() as i32, top.round() as i32, size.round() as i32);
+    let s = size.round() as i32;
     if s < 32 {
         return None;
     }
+    Some((left.round() as i32, top.round() as i32, s))
+}
+
+pub(crate) fn crop_avatar(img: &image::RgbaImage, lines: &[OcrLine]) -> Option<image::RgbaImage> {
+    let (x, y, s) = avatar_geometry(lines, img.width() as i32, img.height() as i32)?;
 
     // The located square includes the frame plus a little neighbouring chrome.
     // Trim a small margin so the exported image is the portrait art itself

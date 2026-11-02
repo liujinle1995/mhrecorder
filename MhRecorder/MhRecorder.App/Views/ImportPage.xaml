@@ -5,575 +5,545 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:MhRecorder.App.Controls"
     xmlns:conv="using:MhRecorder.App.Converters"
+    xmlns:vm="using:MhRecorder.Core.ViewModels"
     Background="{StaticResource WindowBackgroundBrush}">
 
     <Page.Resources>
         <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
-        <conv:BoolToVisibilityConverter x:Key="InverseBoolToVisibility" Invert="True" />
         <conv:NonEmptyToVisibilityConverter x:Key="NonEmptyToVisibility" />
+        <conv:SeverityConverter x:Key="Severity" />
+        <conv:RatioToWidthConverter x:Key="RatioWidth" FullWidth="56" />
+        <conv:ConfidenceToBrushConverter x:Key="ConfidenceBrush" />
+
+        <!-- 字段表一行：字段 / 可改的值 / 置信度 / 原始 OCR 文字 / 还原 -->
+        <DataTemplate x:Key="FieldRowTemplate" x:DataType="vm:FieldRowViewModel">
+            <Grid ColumnSpacing="10" Padding="0,3" Background="Transparent">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="76" />
+                    <ColumnDefinition Width="*" MinWidth="88" />
+                    <ColumnDefinition Width="72" />
+                    <ColumnDefinition Width="1.1*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="1">
+                    <TextBlock Text="{x:Bind Label}" FontSize="13"
+                               Foreground="{StaticResource TextSecondaryBrush}" />
+                    <TextBlock Text="{x:Bind StatusText}" FontSize="10.5"
+                               Foreground="{StaticResource TextTertiaryBrush}" />
+                </StackPanel>
+
+                <!-- 值本身可改：识别错了直接在这里改，保存时用的是改后的数 -->
+                <TextBox Grid.Column="1"
+                         Text="{Binding ValueText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         FontSize="14"
+                         FontWeight="SemiBold"
+                         FontFamily="{StaticResource UiDisplayFontFamily}"
+                         VerticalAlignment="Center"
+                         Padding="8,3"
+                         MinHeight="30"
+                         BorderThickness="1"
+                         CornerRadius="6"
+                         AutomationProperties.AutomationId="FieldValueBox" />
+
+                <!-- 置信度：数值 + 一条细条，低于 85% 标黄 -->
+                <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="3">
+                    <TextBlock Text="{x:Bind ConfidenceText}" FontSize="12"
+                               HorizontalAlignment="Left"
+                               Foreground="{x:Bind Confidence, Converter={StaticResource ConfidenceBrush}}" />
+                    <Border Height="3" CornerRadius="2" Background="#FFEDEDF0" Width="56"
+                            HorizontalAlignment="Left">
+                        <Border Background="{x:Bind Confidence, Converter={StaticResource ConfidenceBrush}}"
+                                CornerRadius="2"
+                                HorizontalAlignment="Left"
+                                Width="{x:Bind ConfidenceRatio, Converter={StaticResource RatioWidth}}" />
+                    </Border>
+                </StackPanel>
+
+                <TextBlock Grid.Column="3" Text="{x:Bind RawText}"
+                           FontSize="11.5"
+                           VerticalAlignment="Center"
+                           MaxLines="1"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="{StaticResource TextTertiaryBrush}" />
+
+                <Button Grid.Column="4"
+                        Content="&#xE7A7;"
+                        FontFamily="{StaticResource IconFontFamily}"
+                        FontSize="12"
+                        Style="{StaticResource LinkButtonStyle}"
+                        Padding="6,4"
+                        ToolTipService.ToolTip="还原为识别值"
+                        Command="{x:Bind RevertCommand}" />
+            </Grid>
+        </DataTemplate>
+
+        <!-- 身份候选：名字 + 置信度 + 依据 + 确认/排除 -->
+        <DataTemplate x:Key="CandidateTemplate" x:DataType="vm:IdentityCandidateRowViewModel">
+            <Border Background="{StaticResource SubtleFillBrush}"
+                    BorderBrush="{StaticResource CardBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="9"
+                    Padding="12,8"
+                    Margin="0,0,10,0"
+                    MinWidth="330">
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" Spacing="3">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="{x:Bind Nickname}" FontSize="14" FontWeight="SemiBold" />
+                            <Border Background="{StaticResource ChipBackgroundBrush}"
+                                    CornerRadius="5" Padding="6,1" VerticalAlignment="Center">
+                                <TextBlock Text="{x:Bind ConfidenceText}" FontSize="11"
+                                           Foreground="{StaticResource TextSecondaryBrush}" />
+                            </Border>
+                            <TextBlock Text="{x:Bind Detail}" FontSize="11.5"
+                                       VerticalAlignment="Center"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                        </StackPanel>
+                        <TextBlock Text="{x:Bind EvidenceText}" FontSize="11.5"
+                                   TextWrapping="Wrap" MaxLines="2"
+                                   Foreground="{StaticResource TextTertiaryBrush}" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6"
+                                VerticalAlignment="Center">
+                        <Button Content="确认"
+                                Style="{StaticResource PrimaryButtonStyle}"
+                                Padding="12,5"
+                                FontSize="12.5"
+                                Command="{x:Bind ConfirmCommand}" />
+                        <Button Content="排除"
+                                Style="{StaticResource GhostButtonStyle}"
+                                Padding="10,5"
+                                Command="{x:Bind RejectCommand}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
     </Page.Resources>
 
-    <Grid Padding="26,20,26,18" RowSpacing="14">
+    <Grid x:Name="ImportRoot" Padding="26,18,26,14" RowSpacing="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- ============ Page header ============ -->
-        <StackPanel Grid.Row="0" Spacing="6">
-            <TextBlock Text="录入识别" Style="{StaticResource PageTitleText}" />
-            <TextBlock Text="拖入《梦幻西游手游》的角色属性或背包截图，自动识别并归档"
-                       Style="{StaticResource PageSubtitleText}" />
-        </StackPanel>
+        <!-- ============ header ============ -->
+        <Grid Grid.Row="0">
+            <StackPanel Spacing="4">
+                <TextBlock Text="录入识别" Style="{StaticResource PageTitleText}" />
+                <TextBlock Text="拖入《梦幻西游手游》截图 · 自动识别 · 逐字段核对后入库"
+                           Style="{StaticResource PageSubtitleText}" />
+            </StackPanel>
 
-        <!-- ============ Two-column body ============ -->
-        <Grid Grid.Row="1" ColumnSpacing="16">
+            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right"
+                        VerticalAlignment="Center">
+                <Button Content="选择文件" Style="{StaticResource SecondaryButtonStyle}"
+                        Padding="14,7"
+                        AutomationProperties.AutomationId="SelectFilesButton"
+                        Command="{x:Bind ViewModel.SelectFilesCommand}" />
+                <Button Style="{StaticResource SecondaryButtonStyle}" Padding="14,7"
+                        AutomationProperties.AutomationId="CaptureButton"
+                        Command="{x:Bind ViewModel.CaptureCommand}">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="&#xE722;" FontFamily="{StaticResource IconFontFamily}"
+                                   FontSize="13" VerticalAlignment="Center"
+                                   Foreground="{StaticResource BrandBlueBrush}" />
+                        <TextBlock Text="截图识别" FontSize="13" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+                <Button Style="{StaticResource SecondaryButtonStyle}" Padding="14,7"
+                        AutomationProperties.AutomationId="PasteButton"
+                        Command="{x:Bind ViewModel.PasteCommand}">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="&#xE77F;" FontFamily="{StaticResource IconFontFamily}"
+                                   FontSize="13" VerticalAlignment="Center"
+                                   Foreground="{StaticResource TextSecondaryBrush}" />
+                        <TextBlock Text="粘贴 (Ctrl+V)" FontSize="13" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- ============ body ============ -->
+        <Grid Grid.Row="1" ColumnSpacing="14">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="0.86*" />
-                <ColumnDefinition Width="1.14*" />
+                <ColumnDefinition Width="1*" MinWidth="320" />
+                <ColumnDefinition Width="1.28*" MinWidth="420" />
             </Grid.ColumnDefinitions>
 
-            <!-- = Left: drop zone = -->
-            <Border x:Name="DropZoneCard"
-                    Grid.Column="0"
-                    Background="{StaticResource CardBackgroundBrush}"
-                    CornerRadius="12"
-                    AllowDrop="True"
-                    DragOver="OnDropZoneDragOver"
-                    DragLeave="OnDropZoneDragLeave"
-                    Drop="OnDropZoneDrop"
-                    Padding="1">
-                <Grid>
-                    <!-- Dashed drop-zone outline (a Rectangle so we can dash the stroke) -->
-                    <Rectangle x:Name="DropZoneOutline"
-                               RadiusX="12" RadiusY="12"
-                               Stroke="#FFD9DAE0" StrokeThickness="1.2"
-                               StrokeDashArray="4 3"
-                               StrokeDashCap="Round"
-                               Fill="Transparent"
-                               IsHitTestVisible="False" />
-
-                    <!-- Stretch horizontally so wrapped text is bounded by the
-                         card width; a centred StackPanel would otherwise be
-                         measured at its intrinsic width and overflow. -->
-                    <StackPanel x:Name="DropEmptyPanel"
-                                VerticalAlignment="Center" HorizontalAlignment="Stretch"
-                                Spacing="0" Margin="28,0" MaxWidth="420">
-
-                        <!-- Upload glyph: rounded square + arrow + dot -->
-                        <Grid Width="60" Height="60" HorizontalAlignment="Center" Margin="0,0,0,22">
-                            <Border BorderBrush="{StaticResource BrandBlueBrush}" BorderThickness="2.6"
-                                    CornerRadius="16" Background="Transparent" />
-                            <TextBlock Text="&#xE898;"
-                                       FontFamily="{StaticResource IconFontFamily}"
-                                       FontSize="25"
-                                       Foreground="{StaticResource BrandBlueBrush}"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center"
-                                       Margin="0,3,0,0" />
-                            <Ellipse Width="6" Height="6" Fill="{StaticResource BrandBlueBrush}"
-                                     HorizontalAlignment="Right" VerticalAlignment="Top"
-                                     Margin="0,9,9,0" />
-                        </Grid>
-
-                        <TextBlock Text="拖入截图开始识别"
-                                   HorizontalAlignment="Center"
-                                   FontFamily="{StaticResource UiDisplayFontFamily}"
-                                   FontSize="21"
-                                   FontWeight="SemiBold"
-                                   Foreground="{StaticResource TextPrimaryBrush}" />
-
-                        <TextBlock Text="支持「人物属性」或「背包」截图，也可直接粘贴剪贴板"
-                                   HorizontalAlignment="Center"
-                                   TextAlignment="Center"
-                                   TextWrapping="Wrap"
-                                   Margin="0,12,0,0"
-                                   FontSize="13.5"
-                                   Foreground="{StaticResource TextSecondaryBrush}" />
-
-                        <Button x:Name="SelectFilesButton"
-                                AutomationProperties.AutomationId="SelectFilesButton"
-                                AutomationProperties.Name="或点击选择文件"
-                                Content="或点击选择文件"
-                                Style="{StaticResource PrimaryButtonStyle}"
-                                HorizontalAlignment="Center"
-                                Margin="0,20,0,0"
-                                Padding="26,10"
-                                Click="OnSelectFilesClick" />
-
-                        <TextBlock Text="拖拽 / 选择 / 粘贴 · 自动 OCR · 完全离线"
-                                   HorizontalAlignment="Center"
-                                   TextAlignment="Center"
-                                   TextWrapping="Wrap"
-                                   Margin="0,16,0,0"
-                                   FontSize="12.5"
-                                   Foreground="{StaticResource TextTertiaryBrush}" />
-
-                        <!-- Two ways to get a screenshot without touching the disk:
-                             抓取另一个应用窗口，或者粘贴已经复制的图。
-                             Both end in the same recognition pipeline. -->
-                        <StackPanel Orientation="Horizontal" Spacing="10"
-                                    HorizontalAlignment="Center" Margin="0,14,0,0">
-                            <Button x:Name="CaptureButton"
-                                    AutomationProperties.AutomationId="CaptureButton"
-                                    AutomationProperties.Name="截图识别"
-                                    Style="{StaticResource SecondaryButtonStyle}"
-                                    Padding="16,9"
-                                    CornerRadius="8"
-                                    Click="OnCaptureClick">
-                                <StackPanel Orientation="Horizontal" Spacing="7">
-                                    <TextBlock Text="&#xE722;"
-                                               FontFamily="{StaticResource IconFontFamily}"
-                                               FontSize="14"
-                                               Foreground="{StaticResource BrandBlueBrush}"
-                                               VerticalAlignment="Center" />
-                                    <TextBlock Text="截图识别" FontSize="13.5" VerticalAlignment="Center" />
-                                </StackPanel>
-                            </Button>
-
-                            <Button x:Name="PasteButton"
-                                    AutomationProperties.AutomationId="PasteButton"
-                                    AutomationProperties.Name="粘贴截图"
-                                    Style="{StaticResource SecondaryButtonStyle}"
-                                    Padding="16,9"
-                                    CornerRadius="8"
-                                    Click="OnPasteClick">
-                                <StackPanel Orientation="Horizontal" Spacing="7">
-                                    <TextBlock Text="&#xE77F;"
-                                               FontFamily="{StaticResource IconFontFamily}"
-                                               FontSize="14"
-                                               Foreground="{StaticResource TextSecondaryBrush}"
-                                               VerticalAlignment="Center" />
-                                    <TextBlock Text="粘贴截图 (Ctrl+V)" FontSize="13.5" VerticalAlignment="Center" />
-                                </StackPanel>
-                            </Button>
-                        </StackPanel>
-                    </StackPanel>
-
-                    <!-- Preview of the image that was captured / pasted.
-                         Replaces the empty state as soon as something is loaded:
-                         a screenshot you cannot see is a screenshot you cannot
-                         trust. Tapping the frame opens it at full size.
-                         A StackPanel (not star-sized rows) keeps the block hugging
-                         the image's own aspect instead of leaving a dead band of
-                         empty canvas above and below a 16:9 frame. -->
-                    <StackPanel x:Name="PreviewPanel" Visibility="Collapsed"
-                                Margin="14,14,14,12" VerticalAlignment="Center" Spacing="0">
-
-                        <Border Background="#FFF7F8FA"
-                                BorderBrush="{StaticResource CardBorderBrush}"
-                                BorderThickness="1"
-                                CornerRadius="10"
-                                Tapped="OnZoomPreviewTapped">
-                            <Image x:Name="PreviewImage"
-                                   Stretch="Uniform"
-                                   Margin="8"
-                                   AutomationProperties.AutomationId="PreviewImage" />
-                        </Border>
-
-                        <StackPanel Spacing="9" Margin="0,10,0,0">
-                            <TextBlock x:Name="PreviewCaptionText"
-                                       FontSize="12"
-                                       TextAlignment="Center"
-                                       TextWrapping="Wrap"
-                                       Foreground="{StaticResource TextTertiaryBrush}" />
-                            <StackPanel Orientation="Horizontal" Spacing="8"
-                                        HorizontalAlignment="Center">
-                                <Button x:Name="ZoomPreviewButton"
-                                        AutomationProperties.AutomationId="ZoomPreviewButton"
-                                        Content="放大查看"
-                                        Style="{StaticResource GhostButtonStyle}"
-                                        Click="OnZoomPreviewClick" />
-                                <Button x:Name="RecaptureButton"
-                                        AutomationProperties.AutomationId="RecaptureButton"
-                                        Content="重新截图"
-                                        Style="{StaticResource GhostButtonStyle}"
-                                        Click="OnCaptureClick" />
-                                <Button x:Name="ClearPreviewButton"
-                                        AutomationProperties.AutomationId="ClearPreviewButton"
-                                        Content="换一张"
-                                        Style="{StaticResource GhostButtonStyle}"
-                                        Click="OnClearPreviewClick" />
-                            </StackPanel>
-                        </StackPanel>
-                    </StackPanel>
-
-                    <!-- Progress pill instead of a full-cover wash: the preview must
-                         stay visible while OCR runs, that is the whole point of
-                         showing what was captured. -->
-                    <Border x:Name="ScanningOverlay"
-                            Visibility="Collapsed"
-                            Background="#F5FFFFFF"
-                            BorderBrush="{StaticResource CardBorderBrush}"
-                            BorderThickness="1"
-                            CornerRadius="18"
-                            Padding="14,7"
-                            HorizontalAlignment="Center" VerticalAlignment="Top"
-                            Margin="0,16,0,0">
-                        <StackPanel Orientation="Horizontal" Spacing="10">
-                            <ProgressRing IsActive="True" Width="16" Height="16"
-                                          Foreground="{StaticResource BrandBlueBrush}" />
-                            <TextBlock Text="正在识别截图…" FontSize="12.5"
-                                       VerticalAlignment="Center"
-                                       Foreground="{StaticResource TextSecondaryBrush}" />
-                        </StackPanel>
-                    </Border>
-                </Grid>
-            </Border>
-
-            <!-- = Right: recognition result = -->
-            <Border Grid.Column="1"
+            <!-- left: capture + OCR boxes -->
+            <Border Grid.Column="0"
                     Background="{StaticResource CardBackgroundBrush}"
                     BorderBrush="{StaticResource CardBorderBrush}"
                     BorderThickness="1"
                     CornerRadius="12"
-                    Padding="20,16,20,18">
+                    AllowDrop="True"
+                    DragOver="OnDropZoneDragOver"
+                    DragLeave="OnDropZoneDragLeave"
+                    Drop="OnDropZoneDrop">
+                <Grid RowSpacing="0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <!-- toolbar: title + zoom + capture tabs -->
+                    <Grid Grid.Row="0" Padding="14,10,10,8" ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0" Text="原始截图" Style="{StaticResource CardTitleText}"
+                                   FontSize="14" VerticalAlignment="Center" />
+
+                        <Button Grid.Column="2" Content="适应窗口" Style="{StaticResource GhostButtonStyle}"
+                                Padding="10,4" FontSize="12"
+                                AutomationProperties.AutomationId="FitButton"
+                                Click="OnFitClick" />
+                    </Grid>
+
+                    <!-- the viewer itself; dashed frame doubles as the drop hint -->
+                    <Grid Grid.Row="1" Margin="10,0,10,0">
+                        <Border BorderBrush="{StaticResource CardBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Background="#FFF7F8FA">
+                            <controls:ZoomableImageView x:Name="Viewer" Margin="1" />
+                        </Border>
+
+                        <!-- empty state: what to do when there is no capture yet -->
+                        <StackPanel x:Name="DropZoneHint" VerticalAlignment="Center"
+                                    HorizontalAlignment="Center" MaxWidth="330" Spacing="0"
+                                    Visibility="{x:Bind ViewModel.ShowDropHint, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                            <Grid Width="54" Height="54" HorizontalAlignment="Center" Margin="0,0,0,16">
+                                <Border BorderBrush="{StaticResource BrandBlueBrush}" BorderThickness="2"
+                                        CornerRadius="14" Background="Transparent" />
+                                <TextBlock Text="&#xE898;" FontFamily="{StaticResource IconFontFamily}"
+                                           FontSize="22" Foreground="{StaticResource BrandBlueBrush}"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Grid>
+                            <TextBlock Text="把截图拖到这里" HorizontalAlignment="Center"
+                                       FontFamily="{StaticResource UiDisplayFontFamily}"
+                                       FontSize="17" FontWeight="SemiBold" />
+                            <TextBlock Text="支持「人物属性」与「背包」面板，一次可拖入多张；也可以直接粘贴剪贴板"
+                                       HorizontalAlignment="Center" TextAlignment="Center"
+                                       TextWrapping="Wrap" Margin="0,10,0,0"
+                                       FontSize="12.5"
+                                       Foreground="{StaticResource TextSecondaryBrush}" />
+                        </StackPanel>
+
+                        <!-- result but no picture: say so instead of showing the
+                             drop hint over an already-recognised capture -->
+                        <Border Visibility="{x:Bind ViewModel.ShowNoImageHint, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
+                                Background="#F2FFFFFF"
+                                BorderBrush="{StaticResource CardBorderBrush}"
+                                BorderThickness="1" CornerRadius="10"
+                                Padding="14,10"
+                                MaxWidth="260"
+                                HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <TextBlock Text="这次识别没有可显示的截图（演示数据，或截图读取失败）"
+                                       FontSize="12" TextWrapping="Wrap" TextAlignment="Center"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                        </Border>
+
+                        <!-- busy pill: keeps the capture visible while OCR runs -->
+                        <Border Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
+                                Background="#F5FFFFFF"
+                                BorderBrush="{StaticResource CardBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="16"
+                                Padding="12,6"
+                                HorizontalAlignment="Center" VerticalAlignment="Top"
+                                Margin="0,10,0,0">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <ProgressRing IsActive="True" Width="14" Height="14"
+                                              Foreground="{StaticResource BrandBlueBrush}" />
+                                <TextBlock Text="{x:Bind ViewModel.BusyText, Mode=OneWay}"
+                                           FontSize="12" VerticalAlignment="Center"
+                                           Foreground="{StaticResource TextSecondaryBrush}" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <StackPanel Grid.Row="2" Padding="14,6,14,10" Spacing="4">
+
+                        <!-- capture tabs: one per imported image, so a batch can be
+                             flipped through without covering the picture itself -->
+                        <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                                      VerticalScrollBarVisibility="Disabled"
+                                      HorizontalScrollMode="Auto"
+                                      VerticalScrollMode="Disabled"
+                                      Visibility="{x:Bind ViewModel.HasPreview, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                            <ItemsControl ItemsSource="{x:Bind ViewModel.ImageTabs, Mode=OneWay}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" Spacing="6" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:ImageTabViewModel">
+                                        <Button Content="{x:Bind Label}"
+                                                FontSize="11.5"
+                                                Padding="9,3"
+                                                Style="{StaticResource GhostButtonStyle}"
+                                                Tag="{x:Bind}"
+                                                Click="OnImageTabClick" />
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+
+                        <TextBlock Text="{x:Bind ViewModel.PreviewCaption, Mode=OneWay}"
+                                   FontSize="11.5"
+                                   TextTrimming="CharacterEllipsis"
+                                   Foreground="{StaticResource TextSecondaryBrush}" />
+                        <TextBlock Text="滚轮缩放 · 按住拖动平移 · 点击方框选中对应字段 · 双击适应窗口"
+                                   FontSize="11"
+                                   Foreground="{StaticResource TextTertiaryBrush}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- right: fields -->
+            <Border Grid.Column="1"
+                    Background="{StaticResource CardBackgroundBrush}"
+                    BorderBrush="{StaticResource CardBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="12">
                 <Grid>
-                    <!-- Empty state -->
-                    <StackPanel x:Name="EmptyResultState"
-                                VerticalAlignment="Center" HorizontalAlignment="Center"
-                                Spacing="10">
+                    <!-- empty -->
+                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="10"
+                                Visibility="{x:Bind ViewModel.ShowEmptyResult, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
                         <TextBlock Text="&#xE9D9;" FontFamily="{StaticResource IconFontFamily}"
-                                   FontSize="34" Foreground="#FFD2D4D9" HorizontalAlignment="Center" />
-                        <TextBlock Text="识别结果会显示在这里"
-                                   FontSize="14" Foreground="{StaticResource TextTertiaryBrush}"
+                                   FontSize="32" Foreground="#FFD2D4D9" HorizontalAlignment="Center" />
+                        <TextBlock Text="识别结果会显示在这里" FontSize="14"
+                                   Foreground="{StaticResource TextTertiaryBrush}"
                                    HorizontalAlignment="Center" />
-                        <TextBlock Text="支持人物属性 + 背包截图合并识别"
-                                   FontSize="12.5" Foreground="{StaticResource TextQuaternaryBrush}"
+                        <TextBlock Text="每个字段都可以对照原始截图逐个核对、直接修改"
+                                   FontSize="12" Foreground="{StaticResource TextQuaternaryBrush}"
                                    HorizontalAlignment="Center" />
                     </StackPanel>
 
-                    <!-- Filled state -->
-                    <ScrollViewer x:Name="ResultScroll"
-                                  VerticalScrollBarVisibility="Auto"
-                                  VerticalScrollMode="Auto"
-                                  HorizontalScrollMode="Disabled"
-                                  HorizontalScrollBarVisibility="Disabled"
-                                  Visibility="Collapsed">
-                        <StackPanel x:Name="ResultPanel" Spacing="0">
+                    <!-- filled -->
+                    <Grid Visibility="{x:Bind ViewModel.HasResult, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
+                          Padding="16,14,16,12" RowSpacing="10">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
 
-                            <!-- Header + confidence badge -->
-                            <Grid Margin="0,2,0,14">
-                                <TextBlock Text="识别结果（保存前可修正）"
-                                           Style="{StaticResource CardTitleText}"
-                                           FontSize="15.5"
-                                           VerticalAlignment="Center" />
-                                <Border x:Name="ConfidenceBadge"
-                                        HorizontalAlignment="Right" VerticalAlignment="Center"
-                                        Background="{StaticResource BadgeGreenBgBrush}"
-                                        CornerRadius="7"
-                                        Padding="10,5">
-                                    <StackPanel Orientation="Horizontal" Spacing="5">
-                                        <TextBlock Text="识别置信度"
-                                                   FontSize="12"
-                                                   Foreground="{StaticResource SuccessGreenBrush}" />
-                                        <TextBlock x:Name="ConfidenceValueText"
-                                                   Text="96%"
-                                                   FontSize="12"
-                                                   FontWeight="SemiBold"
-                                                   Foreground="{StaticResource SuccessGreenBrush}" />
-                                    </StackPanel>
-                                </Border>
-                            </Grid>
+                        <!-- identity header -->
+                        <Grid Grid.Row="0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
 
-                            <!-- Character identity row -->
-                            <Border Background="#FFF7F8FA" CornerRadius="10" Padding="14,12">
+                            <Border Grid.Column="0" Width="46" Height="46" CornerRadius="23"
+                                    Background="#FFE9EDF6" VerticalAlignment="Center">
                                 <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
+                                    <Image x:Name="AvatarImage" Stretch="UniformToFill" />
+                                    <TextBlock x:Name="AvatarInitialText"
+                                               FontFamily="{StaticResource UiDisplayFontFamily}"
+                                               FontSize="18" FontWeight="SemiBold"
+                                               Foreground="#FF7A86A8"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Grid>
+                            </Border>
 
-                                    <Border Grid.Column="0" Width="58" Height="58" CornerRadius="29"
-                                            Background="#FFE9EDF6" VerticalAlignment="Center">
-                                        <Grid>
-                                            <Image x:Name="AvatarImage" Stretch="UniformToFill" />
-                                            <TextBlock x:Name="AvatarInitialText"
-                                                       FontFamily="{StaticResource UiDisplayFontFamily}"
-                                                       FontSize="22" FontWeight="SemiBold"
-                                                       Foreground="White"
-                                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
-                                        </Grid>
+                            <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center" Spacing="3">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock Text="{x:Bind ViewModel.Nickname, Mode=OneWay}"
+                                               FontFamily="{StaticResource UiDisplayFontFamily}"
+                                               FontSize="18" FontWeight="SemiBold" />
+                                    <Border Background="{StaticResource LevelChipBgBrush}"
+                                            CornerRadius="5" Padding="7,1" VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind ViewModel.LevelText, Mode=OneWay}"
+                                                   FontSize="11.5" Foreground="#FF5A63E8" />
                                     </Border>
-
-                                    <StackPanel Grid.Column="1" Margin="14,0,0,0" VerticalAlignment="Center" Spacing="5">
-                                        <StackPanel Orientation="Horizontal" Spacing="9">
-                                            <TextBlock x:Name="NicknameText"
-                                                       Text="海淘淘"
-                                                       FontFamily="{StaticResource UiDisplayFontFamily}"
-                                                       FontSize="19"
-                                                       FontWeight="SemiBold"
-                                                       VerticalAlignment="Center" />
-                                            <Border Background="{StaticResource LevelChipBgBrush}"
-                                                    CornerRadius="6" Padding="7,2" VerticalAlignment="Center">
-                                                <TextBlock x:Name="LevelChipText" Text="Lv.89"
-                                                           FontSize="12"
-                                                           Foreground="#FF5A63E8" />
-                                            </Border>
-                                        </StackPanel>
-                                        <TextBlock x:Name="IdentityLineText"
-                                                   Text="游戏 ID 429277013 · 人物属性 + 背包"
-                                                   FontSize="13"
-                                                   TextWrapping="Wrap"
-                                                   TextTrimming="CharacterEllipsis"
-                                                   Foreground="{StaticResource TextSecondaryBrush}" />
-                                    </StackPanel>
-                                </Grid>
-                            </Border>
-
-                            <!-- Source chip -->
-                            <Border x:Name="SourceChip"
-                                    HorizontalAlignment="Left"
-                                    Background="{StaticResource ChipBackgroundBrush}"
-                                    CornerRadius="7"
-                                    Margin="0,10,0,0"
-                                    Padding="10,6">
-                                <StackPanel Orientation="Horizontal" Spacing="7">
-                                    <TextBlock Text="&#xEB05;" FontFamily="{StaticResource IconFontFamily}"
-                                               FontSize="12.5"
-                                               Foreground="{StaticResource TextSecondaryBrush}"
-                                               VerticalAlignment="Center" />
-                                    <TextBlock x:Name="SourceChipText"
-                                               Text="来源：人物属性 + 背包 · 2 张截图"
-                                               FontSize="12.5"
-                                               Foreground="{StaticResource TextSecondaryBrush}"
-                                               VerticalAlignment="Center" />
                                 </StackPanel>
-                            </Border>
-
-                            <!-- How the identity was resolved, when it took more
-                                 than reading a 游戏ID off the panel — e.g. a
-                                 包裹 capture linked by its 人物评分. -->
-                            <TextBlock x:Name="IdentityEvidenceText"
-                                       Visibility="Collapsed"
-                                       FontSize="12"
-                                       Margin="2,8,0,0"
-                                       TextWrapping="Wrap"
-                                       Foreground="{StaticResource TextTertiaryBrush}"
-                                       AutomationProperties.AutomationId="IdentityEvidenceText" />
-
-                            <!-- 发色 / 武器 read off the character model. Shown
-                                 because it is what future captures will be
-                                 matched on — if it looks wrong, the link it
-                                 produces will be wrong too. -->
-                            <TextBlock x:Name="AppearanceText"
-                                       Visibility="Collapsed"
-                                       FontSize="12"
-                                       Margin="2,4,0,0"
-                                       TextWrapping="Wrap"
-                                       Foreground="{StaticResource TextTertiaryBrush}"
-                                       AutomationProperties.AutomationId="AppearanceText" />
-
-                            <!-- A 包裹 screenshot renders no 游戏ID and no
-                                 nickname, so the recogniser cannot always tell
-                                 whose bag it is. The user says so here by
-                                 picking one of the characters already in the
-                                 library — each row shows 昵称 + 游戏ID so two
-                                 characters with the same name stay apart. -->
-                            <Border x:Name="OwnerPickerPanel"
-                                    Visibility="Collapsed"
-                                    Margin="0,10,0,0"
-                                    Padding="14,12"
-                                    CornerRadius="10"
-                                    BorderThickness="1"
-                                    Background="{StaticResource ChipBackgroundBrush}"
-                                    BorderBrush="{StaticResource CardBorderBrush}">
-                                <StackPanel Spacing="8">
-                                    <TextBlock x:Name="OwnerPickerLabel"
-                                               FontSize="12.5"
-                                               TextWrapping="Wrap"
-                                               Foreground="{StaticResource TextSecondaryBrush}"
-                                               Text="这张截图没有角色身份（包裹面板不显示游戏ID）。从已入库的角色里选一个，本次记录就归到它名下" />
-
-                                    <ComboBox x:Name="OwnerCombo"
-                                              HorizontalAlignment="Stretch"
-                                              PlaceholderText="选择角色"
-                                              AutomationProperties.AutomationId="OwnerCombo" />
-
-                                    <TextBlock x:Name="NoOwnerHintText"
-                                               Visibility="Collapsed"
-                                               FontSize="12"
-                                               TextWrapping="Wrap"
-                                               Foreground="{StaticResource TextTertiaryBrush}"
-                                               Text="库里还没有角色：先在「角色管理」里新建，或先录入一张「人物属性」截图" />
-
-                                    <!-- What will be remembered about this
-                                         character, so the next bag links by itself. -->
-                                    <TextBlock x:Name="AppearanceHintText"
-                                               Visibility="Collapsed"
-                                               FontSize="12"
-                                               TextWrapping="Wrap"
-                                               Foreground="{StaticResource TextTertiaryBrush}"
-                                               AutomationProperties.AutomationId="AppearanceHintText" />
-                                </StackPanel>
-                            </Border>
-
-                            <!-- HP / MP bars panel -->
-                            <Border Background="{StaticResource BarsPanelBgBrush}"
-                                    CornerRadius="10"
-                                    Margin="0,12,0,0"
-                                    Padding="16,15">
-                                <Grid RowSpacing="11">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
-                                    </Grid.RowDefinitions>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="48" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
-
-                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="气血"
-                                               FontSize="13" VerticalAlignment="Center"
-                                               Foreground="{StaticResource TextSecondaryBrush}" />
-                                    <controls:GradientProgressBar x:Name="HpBar" Grid.Row="0" Grid.Column="1"
-                                                                 UseHpGradient="True" BarHeight="20"
-                                                                 Label="7,721" Ratio="1" />
-
-                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="魔法"
-                                               FontSize="13" VerticalAlignment="Center"
-                                               Foreground="{StaticResource TextSecondaryBrush}" />
-                                    <controls:GradientProgressBar x:Name="MpBar" Grid.Row="1" Grid.Column="1"
-                                                                 UseHpGradient="False" BarHeight="20"
-                                                                 Label="2,215" Ratio="1" />
-                                </Grid>
-                            </Border>
-
-                            <!-- 2x3 combat stat cards -->
-                            <Grid Margin="0,12,0,0" ColumnSpacing="12" RowSpacing="12">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                </Grid.RowDefinitions>
-
-                                <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource InsetCardBorderStyle}" Padding="14,10">
-                                    <StackPanel Spacing="3">
-                                        <TextBlock Text="物伤" Style="{StaticResource LabelText}" />
-                                        <TextBlock x:Name="PhysicalDamageText" Text="758" Style="{StaticResource MetricValueText}" />
-                                    </StackPanel>
-                                </Border>
-                                <Border Grid.Row="0" Grid.Column="1" Style="{StaticResource InsetCardBorderStyle}" Padding="14,10">
-                                    <StackPanel Spacing="3">
-                                        <TextBlock Text="法伤" Style="{StaticResource LabelText}" />
-                                        <TextBlock x:Name="MagicDamageText" Text="582" Style="{StaticResource MetricValueText}" />
-                                    </StackPanel>
-                                </Border>
-
-                                <Border Grid.Row="1" Grid.Column="0" Style="{StaticResource InsetCardBorderStyle}" Padding="14,10">
-                                    <StackPanel Spacing="3">
-                                        <TextBlock Text="物防" Style="{StaticResource LabelText}" />
-                                        <TextBlock x:Name="PhysicalDefenseText" Text="1,714" Style="{StaticResource MetricValueText}" />
-                                    </StackPanel>
-                                </Border>
-                                <Border Grid.Row="1" Grid.Column="1" Style="{StaticResource InsetCardBorderStyle}" Padding="14,10">
-                                    <StackPanel Spacing="3">
-                                        <TextBlock Text="法防" Style="{StaticResource LabelText}" />
-                                        <TextBlock x:Name="MagicDefenseText" Text="948" Style="{StaticResource MetricValueText}" />
-                                    </StackPanel>
-                                </Border>
-
-                                <Border Grid.Row="2" Grid.Column="0" Style="{StaticResource InsetCardBorderStyle}" Padding="14,10">
-                                    <StackPanel Spacing="3">
-                                        <TextBlock Text="速度" Style="{StaticResource LabelText}" />
-                                        <TextBlock x:Name="SpeedText" Text="892" Style="{StaticResource MetricValueText}" />
-                                    </StackPanel>
-                                </Border>
-                                <Border Grid.Row="2" Grid.Column="1" Style="{StaticResource InsetCardBorderStyle}" Padding="14,10">
-                                    <StackPanel Spacing="3">
-                                        <TextBlock Text="治疗强度" Style="{StaticResource LabelText}" />
-                                        <TextBlock x:Name="HealingText" Text="408" Style="{StaticResource MetricValueText}" />
-                                    </StackPanel>
-                                </Border>
-                            </Grid>
-
-                            <!-- Gold / silver -->
-                            <Grid Margin="0,12,0,0" ColumnSpacing="12">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-
-                                <Border Grid.Column="0"
-                                        Background="{StaticResource GoldCardBgBrush}"
-                                        BorderBrush="{StaticResource GoldCardBorderBrush}"
-                                        BorderThickness="1"
-                                        CornerRadius="9"
-                                        Padding="13,10">
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="*" />
-                                        </Grid.ColumnDefinitions>
-                                        <controls:CoinIcon Grid.Column="0" Kind="Gold" Width="22" Height="22"
-                                                           VerticalAlignment="Center" Margin="0,0,10,0" />
-                                        <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
-                                            <TextBlock Text="金币" FontSize="12" Foreground="#FF9A8147" />
-                                            <TextBlock x:Name="GoldValueText" Text="2,942,685"
-                                                       FontFamily="{StaticResource UiDisplayFontFamily}"
-                                                       FontSize="16.5" FontWeight="SemiBold"
-                                                       Foreground="#FF8A6A1E" />
-                                        </StackPanel>
-                                    </Grid>
-                                </Border>
-
-                                <Border Grid.Column="1"
-                                        Background="{StaticResource SilverCardBgBrush}"
-                                        BorderBrush="{StaticResource SilverCardBorderBrush}"
-                                        BorderThickness="1"
-                                        CornerRadius="9"
-                                        Padding="13,10">
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="*" />
-                                        </Grid.ColumnDefinitions>
-                                        <controls:CoinIcon Grid.Column="0" Kind="Silver" Width="22" Height="22"
-                                                           VerticalAlignment="Center" Margin="0,0,10,0" />
-                                        <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
-                                            <TextBlock Text="银币" FontSize="12" Foreground="#FF7C8798" />
-                                            <TextBlock x:Name="SilverValueText" Text="14,297,169"
-                                                       FontFamily="{StaticResource UiDisplayFontFamily}"
-                                                       FontSize="16.5" FontWeight="SemiBold"
-                                                       Foreground="#FF47505C" />
-                                        </StackPanel>
-                                    </Grid>
-                                </Border>
-                            </Grid>
-
-                            <!-- Actions -->
-                            <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,14,0,2">
-                                <Button x:Name="RecognizeSaveButton"
-                                        AutomationProperties.AutomationId="RecognizeSaveButton"
-                                        Content="识别并保存"
-                                        Style="{StaticResource PrimaryButtonStyle}"
-                                        Padding="20,9"
-                                        Click="OnSaveClick" />
-                                <Button x:Name="UndoButton"
-                                        AutomationProperties.AutomationId="UndoButton"
-                                        Content="撤销本次录入"
-                                        Style="{StaticResource SecondaryButtonStyle}"
-                                        Padding="18,9"
-                                        Click="OnUndoClick" />
+                                <TextBlock Text="{x:Bind ViewModel.IdentityLine, Mode=OneWay}"
+                                           FontSize="12" TextTrimming="CharacterEllipsis"
+                                           Foreground="{StaticResource TextSecondaryBrush}" />
                             </StackPanel>
+
+                            <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="2"
+                                        HorizontalAlignment="Right">
+                                <TextBlock Text="整体置信度" FontSize="10.5" HorizontalAlignment="Right"
+                                           Foreground="{StaticResource TextTertiaryBrush}" />
+                                <Border Background="{StaticResource BadgeGreenBgBrush}" CornerRadius="6"
+                                        Padding="8,2">
+                                    <TextBlock Text="{x:Bind ViewModel.ConfidenceText, Mode=OneWay}"
+                                               FontSize="13" FontWeight="SemiBold"
+                                               Foreground="{StaticResource SuccessGreenBrush}" />
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- source + evidence -->
+                        <StackPanel Grid.Row="1" Spacing="4">
+                            <TextBlock Text="{x:Bind ViewModel.SourceLine, Mode=OneWay}"
+                                       FontSize="11.5"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                            <TextBlock Text="{x:Bind ViewModel.EvidenceText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.HasEvidence, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
+                                       FontSize="11.5" TextWrapping="Wrap"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                            <TextBlock Text="{x:Bind ViewModel.AppearanceText, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.HasAppearance, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
+                                       FontSize="11.5" TextWrapping="Wrap"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
                         </StackPanel>
-                    </ScrollViewer>
+
+                        <!-- column headers -->
+                        <Grid Grid.Row="2" Padding="0,4" ColumnSpacing="10"
+                              BorderBrush="{StaticResource MutedBorderBrush}" BorderThickness="0,0,0,1">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="76" />
+                                <ColumnDefinition Width="*" MinWidth="88" />
+                                <ColumnDefinition Width="72" />
+                                <ColumnDefinition Width="1.1*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="字段" FontSize="11"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="识别结果（可修改）" FontSize="11"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                            <TextBlock Grid.Column="2" Text="置信度" FontSize="11"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                            <TextBlock Grid.Column="3" Text="原始 OCR 文字" FontSize="11"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                        </Grid>
+
+                        <ListView Grid.Row="3"
+                                  x:Name="FieldList"
+                                  ItemsSource="{x:Bind ViewModel.Fields, Mode=OneWay}"
+                                  SelectedItem="{x:Bind ViewModel.SelectedField, Mode=TwoWay}"
+                                  ItemTemplate="{StaticResource FieldRowTemplate}"
+                                  SelectionMode="Single"
+                                  Padding="0,4,0,4"
+                                  ScrollViewer.HorizontalScrollMode="Disabled"
+                                  AutomationProperties.AutomationId="FieldTable">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="Padding" Value="6,1" />
+                                    <Setter Property="MinHeight" Value="0" />
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="UseSystemFocusVisuals" Value="False" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                        </ListView>
+
+                        <StackPanel Grid.Row="4" Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
+                            <Button Content="保存本次识别"
+                                    Style="{StaticResource PrimaryButtonStyle}"
+                                    Padding="18,8"
+                                    AutomationProperties.AutomationId="RecognizeSaveButton"
+                                    Command="{x:Bind ViewModel.SaveCommand}" />
+                            <Button Content="撤销本次录入"
+                                    Style="{StaticResource SecondaryButtonStyle}"
+                                    Padding="16,8"
+                                    AutomationProperties.AutomationId="UndoButton"
+                                    Command="{x:Bind ViewModel.UndoCommand}" />
+                            <TextBlock Text="改过的值会随本次记录一起入库"
+                                       VerticalAlignment="Center" FontSize="11.5"
+                                       TextTrimming="CharacterEllipsis"
+                                       MaxWidth="220"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                        </StackPanel>
+                    </Grid>
                 </Grid>
             </Border>
         </Grid>
 
-        <!-- Non-blocking feedback (剪贴板里没图 / 截取失败 / 没识别到内容).
-             It cannot live inside the result panel: that panel is collapsed
-             whenever there is no result, so the message would be invisible —
-             which is exactly how the old 粘贴截图 button looked like a no-op. -->
-        <InfoBar x:Name="HintBar" Grid.Row="2"
+        <!-- ============ identity strip ============ -->
+        <Border Grid.Row="2"
+                Background="{StaticResource CardBackgroundBrush}"
+                BorderBrush="{StaticResource CardBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="12"
+                Padding="14,10"
+                Visibility="{x:Bind ViewModel.HasResult, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+            <Grid ColumnSpacing="14">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="3" MinWidth="150">
+                    <TextBlock Text="身份关联" Style="{StaticResource CardTitleText}" FontSize="13.5" />
+                    <TextBlock Text="{x:Bind ViewModel.IdentityStateText, Mode=OneWay}"
+                               FontSize="11.5" TextWrapping="Wrap" MaxWidth="220"
+                               Foreground="{StaticResource TextTertiaryBrush}" />
+                </StackPanel>
+
+                <Grid Grid.Column="1">
+                    <!-- 候选：需要人判断 -->
+                    <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                                  VerticalScrollBarVisibility="Disabled"
+                                  HorizontalScrollMode="Auto"
+                                  VerticalScrollMode="Disabled"
+                                  Visibility="{x:Bind ViewModel.HasCandidates, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                        <ItemsControl ItemsSource="{x:Bind ViewModel.Candidates, Mode=OneWay}"
+                                      ItemTemplate="{StaticResource CandidateTemplate}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Horizontal" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <!-- 已确定 / 需要手选 -->
+                    <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center"
+                                Visibility="{x:Bind ViewModel.IdentityNeedsAttention, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="{x:Bind ViewModel.IdentityStateDetail, Mode=OneWay}"
+                                   FontSize="12"
+                                   VerticalAlignment="Center"
+                                   MaxWidth="460"
+                                   TextWrapping="Wrap"
+                                   Foreground="{StaticResource TextSecondaryBrush}" />
+
+                        <StackPanel Orientation="Horizontal" Spacing="8"
+                                    VerticalAlignment="Center"
+                                    Visibility="{x:Bind ViewModel.ShowOwnerPicker, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                            <ComboBox x:Name="OwnerCombo"
+                                      MinWidth="220"
+                                      PlaceholderText="选择归属角色"
+                                      ItemsSource="{x:Bind ViewModel.Owners, Mode=OneWay}"
+                                      SelectedItem="{x:Bind ViewModel.SelectedOwner, Mode=TwoWay}"
+                                      AutomationProperties.AutomationId="OwnerCombo" />
+                            <TextBlock Text="{x:Bind ViewModel.OwnerHint, Mode=OneWay}"
+                                       FontSize="11" MaxWidth="300" TextWrapping="Wrap"
+                                       VerticalAlignment="Center"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <!-- ============ hint bar ============ -->
+        <InfoBar Grid.Row="3"
                  AutomationProperties.AutomationId="ImportHintBar"
-                 IsOpen="False" IsClosable="True"
-                 Severity="Informational"
-                 Message="" />
+                 IsOpen="{x:Bind ViewModel.IsHintOpen, Mode=TwoWay}"
+                 IsClosable="True"
+                 Severity="{x:Bind ViewModel.HintSeverity, Mode=OneWay, Converter={StaticResource Severity}}"
+                 Message="{x:Bind ViewModel.HintMessage, Mode=OneWay}" />
     </Grid>
 </Page>

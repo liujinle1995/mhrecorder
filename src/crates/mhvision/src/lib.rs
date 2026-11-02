@@ -16,6 +16,7 @@
 //! | [`appearance`] | 发色 / 武器特征 | 少 |
 //! | [`ocr`] | PP-OCRv4 检测 + 识别 | 换引擎时 |
 //! | [`extract`] | 从 OCR 行里抠字段 | 改启发式时 |
+//! | [`regions`] | 字段值对应回截图上的像素框 | 少 |
 //! | [`pipeline`] | 把上面这些串成一次调用 | 少 |
 //!
 //! 拆开的理由很直接：这几种东西的变化频率完全不同。改字段提取时，不该有
@@ -32,6 +33,7 @@ mod identity;
 mod imgops;
 mod ocr;
 mod pipeline;
+mod regions;
 mod thumbnail;
 mod types;
 
@@ -47,7 +49,7 @@ pub(crate) mod prelude {
     pub use crate::types::{JobControl, NoControl, OcrLine, Result, VisionError};
     pub use mhcore::{
         AttributeValue, Character, CombatStats, Currencies, EquipmentItem,
-        EvidenceKind, IdentityCandidate, IdentityRef, IdentitySource, InventoryItem, MatchEvidence,
+        EvidenceKind, FieldRegion, IdentityCandidate, IdentityRef, IdentitySource, InventoryItem, MatchEvidence,
         PanelFingerprint, RecognitionResult, ScreenKind,
     };
     pub use opencv::prelude::*;
