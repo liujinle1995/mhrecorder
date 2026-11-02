@@ -13,8 +13,10 @@
 //! **No console, ever, unless asked.** See `main` for the 0.9.2 postmortem.
 
 mod dispatch;
+mod limits;
 mod pipe;
 mod state;
+mod tasks;
 mod winpipe;
 
 use std::path::{Path, PathBuf};
@@ -114,7 +116,7 @@ fn main() {
     // Optional: serve only one request from stdin JSON, then exit. Used by the
     // CLI and by integration tests that don't want a long-lived server.
     if stdio_mode {
-        if let Err(e) = run_stdio(&models_dir, &data_dir) {
+        if let Err(e) = run_stdio(&models_dir, &data_dir, limits::Limits::from_env()) {
             emit(true, &format!("mhservice --stdio failed: {e:#}"));
             std::process::exit(1);
         }
@@ -139,7 +141,10 @@ fn main() {
     emit(false, "MHREADY");
 
     let shared: Arc<state::AppState> = state;
-    if let Err(e) = winpipe::run_server(pipe::PIPE_NAME, shared) {
+    if let Err(e) = winpipe::run_server(pipe::PIPE_NAME, Arc::clone(&shared)) {
+        // 关停前把还在跑的识别任务标记为取消：它们占着 OCR 会话，让进程
+        // 干等不如明确放弃。
+        shared.tasks.cancel_all();
         emit(true, &format!("pipe server failed: {e}"));
         std::process::exit(1);
     }
@@ -207,20 +212,25 @@ mod win_console {
 }
 
 /// Read request lines from stdin, write responses to stdout.
-fn run_stdio(models_dir: &std::path::Path, data_dir: &str) -> anyhow::Result<()> {
-    let state = state::AppState::new(models_dir, data_dir)?;
-    use std::io::{BufRead, Write};
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let resp = dispatch::handle_line(&state, line.trim());
-        stdout.write_all(resp.as_bytes())?;
-        stdout.flush()?;
-    }
+///
+/// 走和管道同一个 `serve_stream`：这样单行上限、超限处理、非法 UTF-8 的行为
+/// 在 `--stdio` 和管道两种入口下完全一致，不会出现"CLI 能过、界面炸"的分叉。
+fn run_stdio(
+    models_dir: &std::path::Path,
+    data_dir: &str,
+    limits: limits::Limits,
+) -> anyhow::Result<()> {
+    let state = state::AppState::with_limits(models_dir, data_dir, limits.clone())?;
+    let opts = pipe::ServeOptions {
+        max_line_bytes: limits.max_message_bytes,
+        close_on_oversize: true,
+    };
+    pipe::serve_stream(
+        std::io::stdin(),
+        std::io::stdout(),
+        opts,
+        |line| Some(dispatch::handle_line(&state, line)),
+    )?;
     Ok(())
 }
 

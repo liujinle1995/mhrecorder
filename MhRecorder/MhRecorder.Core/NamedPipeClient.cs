@@ -254,6 +254,22 @@ public sealed class NamedPipeClient : IDisposable
 
     public Task ClearDataAsync(CancellationToken ct = default) =>
         CallAsync(Methods.DataClear, new { }, ct);
+
+    /// <summary>Full backup (data.json + database + manifest) written to <paramref name="path"/>.</summary>
+    public Task<JsonElement?> BackupAsync(string path, bool includeDatabase = true, CancellationToken ct = default) =>
+        CallAsync(Methods.ExportBackup, new { Path = path, IncludeDatabase = includeDatabase }, ct);
+
+    /// <summary>Running recognitions plus the recent task history.</summary>
+    public Task<JsonElement?> TasksAsync(int limit = 20, CancellationToken ct = default) =>
+        CallAsync(Methods.TasksList, new { Limit = limit }, ct);
+
+    /// <summary>
+    /// Ask the backend to stop a running recognition. Cancellation is checked
+    /// between images, so the call returns immediately and the task ends after
+    /// the image currently being processed.
+    /// </summary>
+    public Task<JsonElement?> CancelTaskAsync(string taskId, CancellationToken ct = default) =>
+        CallAsync(Methods.TasksCancel, new { Id = taskId }, ct);
 }
 
 /// <summary>One screenshot payload: name + base64 PNG/JPEG.</summary>

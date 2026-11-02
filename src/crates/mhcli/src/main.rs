@@ -38,7 +38,7 @@ fn main() {
 fn print_help() {
     println!("mhcli {} — mhrecorder backend harness\n", env!("CARGO_PKG_VERSION"));
     println!("USAGE:");
-    println!("  mhcli features <image>            Print pHash / ORB / HSV features");
+    println!("  mhcli features <image>            Print dHash / ORB / HSV features");
     println!("  mhcli compare <imageA> <imageB>   Print similarity scores");
     println!("  mhcli classify <image>            Print the detected screen kind");
     println!("  mhcli panel <image>               Print the panel box locate_panel() would crop to");
@@ -49,7 +49,11 @@ fn print_help() {
     println!("  mhcli db-list                     List stored characters");
     println!("  mhcli db-stats                    Print the statistics payload");
     println!("  mhcli save [--to <id>] <image>... Recognize and persist a batch");
+    println!("  mhcli eval <dataset-dir> [--json <out>]");
+    println!("                                    Run the pipeline over a labelled dataset and score it");
     println!("  mhcli export-json <dir>           Export all data as JSON");
+    println!("  mhcli backup <file.zip> [--no-db] Full backup: JSON + database + manifest");
+    println!("  mhcli db-tasks [limit]            Show the recognition task history");
     println!("\nModels dir comes from MH_MODELS_DIR; data dir from MH_DATA_DIR");
     println!("(both default to sensible values, see scripts/env.ps1).");
 }
@@ -101,7 +105,7 @@ fn run(args: &[String]) -> Result<()> {
         "features" => {
             let img = load_image(&args[1])?;
             let f = mhvision::extract_features(&img)?;
-            println!("phash       = {:016x}", f.phash);
+            println!("dhash       = {:016x}", f.dhash);
             println!("dimensions  = {}x{}", f.width, f.height);
             println!("orb         = {} keypoints, {} descriptor bytes",
                 f.orb_keypoints.len(), f.orb.len());
@@ -112,7 +116,14 @@ fn run(args: &[String]) -> Result<()> {
                 .filter(|(_, v)| **v > 0.02)
                 .map(|(i, v)| format!("h{i}:{v:.3}"))
                 .collect();
-            println!("hsv(32 bin) = {}", non_zero.join(" "));
+            println!(
+                "hsv         = {} hue bins + {} sat + {} val (sum {:.2})",
+                mhvision::HUE_BINS,
+                mhvision::SAT_BINS,
+                mhvision::VAL_BINS,
+                f.hsv_hist.iter().sum::<f32>()
+            );
+            println!("hue peaks   = {}", non_zero.join(" "));
             Ok(())
         }
         "compare" => {
@@ -121,10 +132,10 @@ fn run(args: &[String]) -> Result<()> {
             let fa = mhvision::extract_features(&a)?;
             let fb = mhvision::extract_features(&b)?;
             let s = mhvision::compare(&fa, &fb);
-            println!("phash = {:.4}", s.phash);
-            println!("orb   = {:.4}", s.orb);
-            println!("hsv   = {:.4}", s.hsv);
-            println!("blend = {:.4}", s.combined());
+            println!("dhash  = {:.4}", s.dhash);
+            println!("orb    = {:.4} ({} 个几何内点)", s.orb, s.orb_inliers);
+            println!("hsv    = {:.4}", s.hsv);
+            println!("blend  = {:.4}", s.combined());
             Ok(())
         }
         "classify" => {
@@ -195,7 +206,8 @@ fn run(args: &[String]) -> Result<()> {
                 .map(|d| d.character)
                 .collect();
             let refs = store.list_identity_refs()?;
-            let result = pipeline.recognize_batch_with(&images, &known, &refs)?;
+            let result =
+                pipeline.recognize_batch_with(&images, &known, &refs, &mhvision::NoControl)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
@@ -271,7 +283,8 @@ fn run(args: &[String]) -> Result<()> {
                 .map(|d| d.character)
                 .collect();
             let refs = store.list_identity_refs()?;
-            let mut result = pipeline.recognize_batch_with(&images, &known, &refs)?;
+            let mut result =
+                pipeline.recognize_batch_with(&images, &known, &refs, &mhvision::NoControl)?;
             if let Some(id) = target {
                 result.character_id = Some(id);
             }
@@ -300,6 +313,41 @@ fn run(args: &[String]) -> Result<()> {
             println!("wrote {}", path.display());
             Ok(())
         }
+        "backup" => {
+            let dest = PathBuf::from(args.get(1).ok_or_else(|| anyhow!("backup needs a path"))?);
+            let include_db = !args.iter().any(|a| a == "--no-db");
+            let store = mhstore::Store::open_in_data_dir(&data_dir())?;
+            let summary = store.export_backup(&dest, include_db)?;
+            println!(
+                "wrote {} ({:.1} MB, {} entries, database={})",
+                summary.path,
+                summary.bytes as f64 / 1_048_576.0,
+                summary.entries.len(),
+                summary.includes_database
+            );
+            for e in &summary.entries {
+                println!("  - {e}");
+            }
+            Ok(())
+        }
+        "db-tasks" => {
+            let limit = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+            let store = mhstore::Store::open_in_data_dir(&data_dir())?;
+            let tasks = store.list_tasks(limit)?;
+            println!("{} tasks", tasks.len());
+            for t in tasks {
+                println!(
+                    "  {:<22} {:<10} {:>7} ms  ok={:?}  {}",
+                    t.id,
+                    t.state,
+                    t.duration_ms.unwrap_or(0),
+                    t.ok,
+                    t.error.unwrap_or_default()
+                );
+            }
+            Ok(())
+        }
+        "eval" => eval(args),
         other => Err(anyhow!("unknown command '{other}' (try --help)")),
     }
 }
@@ -316,3 +364,214 @@ fn load_batch(paths: &[String]) -> Result<Vec<image::RgbaImage>> {
     paths.iter().map(|p| load_image(p)).collect()
 }
 
+// ---------------------------------------------------------------------------
+// 批量评估
+// ---------------------------------------------------------------------------
+//
+// 识别质量最怕的是"改了一处启发式，只有那几张手测过的图还记得测"。这里把
+// 数据集做成目录约定，一条命令跑全量，任何一个字段退化都会让退出码变成 1，
+// 可以直接挂到 CI 或发版前的检查里。
+//
+// 目录结构：
+//   dataset/
+//     case-001/
+//       expect.json      { "nickname": "莫莫莫", "gameId": "429277361",
+//                          "gold": 2625812, "screen": "bag" }
+//       1.png  2.png     这一批会被当成同一角色的多张截图
+//
+// 只写关心的字段即可；没写的字段不参与比较，也就不会因为"没标"而失败。
+
+/// 一条用例的判定结果。
+struct CaseOutcome {
+    name: String,
+    failures: Vec<String>,
+    observed: serde_json::Value,
+}
+
+/// 数据集里一个目录算一例；每个目录的截图合成一次批次。
+fn eval(args: &[String]) -> Result<()> {
+    let dir_arg = args
+        .get(1)
+        .filter(|a| !a.starts_with("--"))
+        .ok_or_else(|| anyhow!("eval needs a dataset directory"))?;
+    let root = PathBuf::from(dir_arg);
+    let json_out = args
+        .iter()
+        .position(|a| a == "--json")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from);
+
+    let mut cases: Vec<PathBuf> = std::fs::read_dir(&root)
+        .with_context(|| format!("reading dataset dir {}", root.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    cases.sort();
+    if cases.is_empty() {
+        return Err(anyhow!(
+            "{} 里没有用例目录（每个子目录放 expect.json + 截图）",
+            root.display()
+        ));
+    }
+
+    let mut pipeline =
+        mhvision::RecognitionPipeline::new(&models_dir()).context("loading pipeline")?;
+    let store = mhstore::Store::open_in_data_dir(&data_dir())?;
+    let known: Vec<mhcore::Character> = store
+        .list_characters()?
+        .into_iter()
+        .map(|d| d.character)
+        .collect();
+    let refs = store.list_identity_refs()?;
+
+    let mut outcomes: Vec<CaseOutcome> = Vec::new();
+    let mut field_stats: std::collections::BTreeMap<String, (usize, usize)> =
+        std::collections::BTreeMap::new();
+
+    for dir in &cases {
+        let name = dir
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let expect_path = dir.join("expect.json");
+        let expect: serde_json::Value = match std::fs::read_to_string(&expect_path) {
+            Ok(text) => serde_json::from_str(&text)
+                .with_context(|| format!("parsing {}", expect_path.display()))?,
+            Err(_) => serde_json::json!({}),
+        };
+
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| is_image_path(p))
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            outcomes.push(CaseOutcome {
+                name,
+                failures: vec!["目录里没有截图".into()],
+                observed: serde_json::Value::Null,
+            });
+            continue;
+        }
+
+        let images: Vec<image::RgbaImage> = files
+            .iter()
+            .map(|p| load_image(&p.to_string_lossy()))
+            .collect::<Result<_>>()?;
+        let result = pipeline.recognize_batch_with(&images, &known, &refs, &mhvision::NoControl)?;
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut note = |field: &str, ok: bool, detail: String, failures: &mut Vec<String>| {
+            let entry = field_stats.entry(field.to_string()).or_insert((0, 0));
+            entry.1 += 1;
+            if ok {
+                entry.0 += 1;
+            } else {
+                failures.push(format!("{field}: {detail}"));
+            }
+        };
+
+        if let Some(want) = expect.get("nickname").and_then(|v| v.as_str()) {
+            let got = result.character.nickname.clone().unwrap_or_default();
+            let ok = got.trim() == want.trim();
+            note("nickname", ok, format!("期望 {want}，实际 {got}"), &mut failures);
+        }
+        if let Some(want) = expect.get("gameId").and_then(|v| v.as_str()) {
+            let got = result.character.game_id.clone().unwrap_or_default();
+            let ok = got == want;
+            note("gameId", ok, format!("期望 {want}，实际 {got}"), &mut failures);
+        }
+        for (field, got) in [
+            ("gold", result.currencies.gold.as_ref().map(|v| v.value)),
+            ("silver", result.currencies.silver.as_ref().map(|v| v.value)),
+        ] {
+            if let Some(want) = expect.get(field).and_then(|v| v.as_i64()) {
+                note(field, got == Some(want), format!("期望 {want}，实际 {got:?}"), &mut failures);
+            }
+        }
+        if let Some(want) = expect.get("screen").and_then(|v| v.as_str()) {
+            let expected = match want {
+                "bag" | "inventory" => mhcore::ScreenKind::Inventory,
+                "attr" | "attributes" => mhcore::ScreenKind::CharacterAttributes,
+                _ => mhcore::ScreenKind::Unknown,
+            };
+            let ok = result.screens.contains(&expected);
+            note("screen", ok, format!("期望 {want}，实际 {:?}", result.screens), &mut failures);
+        }
+
+        let observed = serde_json::json!({
+            "nickname": result.character.nickname,
+            "gameId": result.character.game_id,
+            "level": result.character.level,
+            "gold": result.currencies.gold.as_ref().map(|v| v.value),
+            "silver": result.currencies.silver.as_ref().map(|v| v.value),
+            "screens": result.screens,
+            "identitySource": result.identity_source,
+            "conflicts": result.conflicts,
+            "warnings": result.warnings,
+        });
+        outcomes.push(CaseOutcome { name, failures, observed });
+    }
+
+    // ---- 报告 ----
+    println!("dataset: {} ({} 例)", root.display(), outcomes.len());
+    let mut failed = 0usize;
+    for o in &outcomes {
+        if o.failures.is_empty() {
+            println!("  PASS  {}", o.name);
+        } else {
+            failed += 1;
+            println!("  FAIL  {}", o.name);
+            for f in &o.failures {
+                println!("          {f}");
+            }
+        }
+    }
+
+    println!("\n字段准确率:");
+    for (field, (ok, total)) in &field_stats {
+        let pct = if *total == 0 { 0.0 } else { *ok as f64 * 100.0 / *total as f64 };
+        println!("  {field:<10} {ok}/{total}  {pct:.1}%");
+    }
+    println!("\n合计 {}/{} 例通过", outcomes.len() - failed, outcomes.len());
+
+    if let Some(path) = json_out {
+        let fields: serde_json::Map<String, serde_json::Value> = field_stats
+            .iter()
+            .map(|(k, (ok, total))| {
+                (k.clone(), serde_json::json!({ "ok": ok, "total": total }))
+            })
+            .collect();
+        let report = serde_json::json!({
+            "dataset": root.to_string_lossy(),
+            "total": outcomes.len(),
+            "passed": outcomes.len() - failed,
+            "cases": outcomes.iter().map(|o| serde_json::json!({
+                "name": o.name,
+                "passed": o.failures.is_empty(),
+                "failures": o.failures,
+                "observed": o.observed,
+            })).collect::<Vec<_>>(),
+            "fields": fields,
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+        println!("report: {}", path.display());
+    }
+
+    if failed > 0 {
+        return Err(anyhow!("{failed} 例未通过"));
+    }
+    Ok(())
+}
+
+fn is_image_path(p: &Path) -> bool {
+    match p.extension().and_then(|s| s.to_str()) {
+        Some(ext) => matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "bmp" | "webp"
+        ),
+        None => false,
+    }
+}

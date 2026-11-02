@@ -76,6 +76,7 @@ pub const PIPE_NAME: &str = "\\\\.\\pipe\\mhrecorder.v1";
 pub const PIPE_TIMEOUT_SECS: u64 = 20;
 
 /// Where the payload lives inside this file.
+#[derive(Debug, Clone, Copy)]
 pub struct Payload {
     pub offset: u64,
     pub length: u64,
@@ -176,8 +177,16 @@ pub fn install_dir(payload: &Payload) -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    // First 16 hex chars of the payload hash: stable per build, distinct per version.
-    base.join("MhRecorder").join("app").join(&hex(&payload.sha256)[..16])
+    install_dir_under(&base, &payload.sha256)
+}
+
+/// 给定根目录时的安装路径。
+///
+/// 目录名取载荷哈希前 16 位：**每个构建一个目录**。这样升级时新版本解到新
+/// 目录，旧版本的文件不会和新版本混在一起，也不存在"覆盖到一半失败"的中间
+/// 状态——要么新目录完整，要么继续用旧的。
+pub fn install_dir_under(base: &Path, sha256: &[u8; 32]) -> PathBuf {
+    base.join("MhRecorder").join("app").join(&hex(sha256)[..16])
 }
 
 pub fn ensure_extracted(_quiet: bool) -> anyhow::Result<PathBuf> {
@@ -213,8 +222,12 @@ pub fn extract_payload(
     payload: &Payload,
     target: &Path,
 ) -> anyhow::Result<()> {
-    // Validate before writing anything.
-    let digest = hash_payload(std::fs::File::open(std::env::current_exe()?)?, payload)?;
+    // Validate the file we were actually handed, before writing anything.
+    //
+    // 以前这里开的是 `current_exe()`：正常双击运行时两者是同一个文件，所以
+    // 一直没暴露；但 `mhpack.exe --extract <别的包>` 会拿自己的哈希去比别人的
+    // 载荷，永远失败。完整性检查必须针对"正在解的这个文件"。
+    let digest = hash_payload(file.try_clone()?, payload)?;
     if digest != payload.sha256 {
         anyhow::bail!("内置载荷校验失败（文件不完整或已损坏），请重新下载");
     }
@@ -359,7 +372,10 @@ pub fn pack(dir: &Path, out: &Path, stem: &Path) -> anyhow::Result<()> {
     }
 
     // Build the zip in an adjacent temp file (payload can be ~100 MB).
-    let tmp_zip = std::env::temp_dir().join(format!("mhpack-{}.zip", std::process::id()));
+    //
+    // 文件名必须唯一：同一进程里并发打包（测试并行、或将来批量出包）会写到
+    // 同一个 `mhpack-<pid>.zip`，互相截断，产物随即损坏。
+    let tmp_zip = std::env::temp_dir().join(format!("mhpack-{}-{}.zip", std::process::id(), unique_suffix()));
     write_zip(dir, &tmp_zip)?;
 
     let mut stem_file = std::fs::File::open(stem)?;
@@ -408,6 +424,18 @@ pub fn pack(dir: &Path, out: &Path, stem: &Path) -> anyhow::Result<()> {
     );
     println!("  SHA-256 {}", hex(&digest));
     Ok(())
+}
+
+/// 进程内单调递增的序号，用来拼唯一的临时文件名。
+fn unique_suffix() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    (nanos << 16) | (n & 0xFFFF)
 }
 
 /// True when `path` already carries a payload trailer.
@@ -797,5 +825,161 @@ mod tests {
     fn trailer_constants_are_consistent() {
         assert_eq!(MAGIC.len(), 8);
         assert_eq!(TRAILER_LEN, 56);
+    }
+
+    // -----------------------------------------------------------------------
+    // 产物完整性与升级
+    //
+    // 这些测试真的打包、真的解包、真的改坏一个字节，而不是只对着常量断言。
+    // -----------------------------------------------------------------------
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mhpack-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 造一个"像 dist 目录"的东西：入口 exe、后端、一个模型文件。
+    fn make_dist(root: &Path, marker: &str) -> PathBuf {
+        let dist = root.join("dist");
+        std::fs::create_dir_all(dist.join("models")).unwrap();
+        std::fs::write(dist.join(ENTRY_EXE), format!("stub-ui-{marker}")).unwrap();
+        std::fs::write(dist.join(SERVICE_EXE), format!("stub-service-{marker}")).unwrap();
+        std::fs::write(dist.join("models").join("det.onnx"), format!("model-{marker}")).unwrap();
+        dist
+    }
+
+    fn make_stem(root: &Path, tag: &str) -> PathBuf {
+        // stem 只需要是一个不以 magic 结尾的文件；pack 只做拼接。
+        let stem = root.join(format!("stem-{tag}.exe"));
+        std::fs::write(&stem, b"MZ fake gui launcher").unwrap();
+        stem
+    }
+
+    /// `pack` → 结构可解析 → 哈希对得上 → 解出来和原件逐字节一致。
+    #[test]
+    fn pack_extract_roundtrip_is_byte_identical() {
+        let root = temp_dir("roundtrip");
+        let dist = make_dist(&root, "v1");
+        let pkg = root.join("MhRecorder-test.exe");
+        pack(&dist, &pkg, &make_stem(&root, "v1")).unwrap();
+
+        let report = verify_file(Some(&pkg)).unwrap();
+        assert!(report.matches, "刚打出来的包必须自校验通过");
+        assert!(report.length > 0);
+
+        let out = root.join("install");
+        let (file, payload) = payload_from_path(&pkg).unwrap();
+        extract_payload(file, &payload, &out).unwrap();
+
+        for rel in [ENTRY_EXE, SERVICE_EXE, "models/det.onnx"] {
+            let name = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+            let a = std::fs::read(dist.join(&name)).unwrap();
+            let b = std::fs::read(out.join(&name)).unwrap();
+            assert_eq!(a, b, "{rel} 解出来必须和原文件一致");
+        }
+    }
+
+    /// 载荷里改一个字节，`verify_file` 必须报不匹配。
+    #[test]
+    fn tampered_payload_fails_verification() {
+        let root = temp_dir("tamper");
+        let dist = make_dist(&root, "v1");
+        let pkg = root.join("MhRecorder-test.exe");
+        pack(&dist, &pkg, &make_stem(&root, "v1")).unwrap();
+
+        let (_, payload) = payload_from_path(&pkg).unwrap();
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(&pkg).unwrap();
+            f.seek(SeekFrom::Start(payload.offset + 8)).unwrap();
+            f.write_all(&[0xFF]).unwrap();
+        }
+
+        let report = verify_file(Some(&pkg)).unwrap();
+        assert!(!report.matches, "改过字节的包不能再通过校验");
+        assert_ne!(report.expected, report.actual);
+    }
+
+    /// 哈希不对时，解包必须在**写任何文件之前**就中止。
+    #[test]
+    fn corrupted_package_is_refused_before_writing() {
+        let root = temp_dir("corrupt");
+        let dist = make_dist(&root, "v1");
+        let pkg = root.join("MhRecorder-test.exe");
+        pack(&dist, &pkg, &make_stem(&root, "v1")).unwrap();
+
+        let (file, payload) = payload_from_path(&pkg).unwrap();
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(&pkg).unwrap();
+            f.seek(SeekFrom::Start(payload.offset)).unwrap();
+            f.write_all(&[0x00; 4]).unwrap();
+        }
+
+        let out = root.join("install-should-not-exist");
+        let (file2, payload2) = (file, payload);
+        let err = extract_payload(file2, &payload2, &out).unwrap_err();
+        assert!(err.to_string().contains("校验失败"), "{err}");
+        assert!(!out.exists(), "校验失败时一个字节都不该落盘");
+    }
+
+    /// 升级：不同构建得到不同安装目录，互不覆写；旧目录内容原样保留。
+    #[test]
+    fn upgrade_uses_a_fresh_install_dir_and_keeps_the_old_one() {
+        let root = temp_dir("upgrade");
+        let base = root.join("localappdata");
+
+        let v1 = make_dist(&root.join("v1"), "v1");
+        let pkg1 = root.join("v1.exe");
+        pack(&v1, &pkg1, &make_stem(&root, "v1")).unwrap();
+        let (file1, payload1) = payload_from_path(&pkg1).unwrap();
+        let dir1 = install_dir_under(&base, &payload1.sha256);
+        extract_payload(file1, &payload1, &dir1).unwrap();
+
+        // 第二个版本：内容不同 → 载荷哈希不同 → 目录不同。
+        let v2 = make_dist(&root.join("v2"), "v2");
+        let pkg2 = root.join("v2.exe");
+        pack(&v2, &pkg2, &make_stem(&root, "v2")).unwrap();
+        let (file2, payload2) = payload_from_path(&pkg2).unwrap();
+        let dir2 = install_dir_under(&base, &payload2.sha256);
+        extract_payload(file2, &payload2, &dir2).unwrap();
+
+        assert_ne!(dir1, dir2, "每个构建一个目录，升级不覆盖旧版本");
+        assert_eq!(std::fs::read_to_string(dir1.join(ENTRY_EXE)).unwrap(), "stub-ui-v1");
+        assert_eq!(std::fs::read_to_string(dir2.join(ENTRY_EXE)).unwrap(), "stub-ui-v2");
+    }
+
+    /// 同一个包重复解到同一个目录必须幂等（用户连点两次、或更新后首次启动）。
+    #[test]
+    fn extracting_twice_to_the_same_dir_is_idempotent() {
+        let root = temp_dir("idempotent");
+        let dist = make_dist(&root, "v1");
+        let pkg = root.join("pkg.exe");
+        pack(&dist, &pkg, &make_stem(&root, "v1")).unwrap();
+        let out = root.join("install");
+
+        for _ in 0..2 {
+            let (file, payload) = payload_from_path(&pkg).unwrap();
+            extract_payload(file, &payload, &out).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(out.join(ENTRY_EXE)).unwrap(), "stub-ui-v1");
+    }
+
+    /// 不是 mhpack 产物时，报错要说人话（用户最常撞到的就是"拿目录当 exe"）。
+    #[test]
+    fn a_plain_file_is_rejected_with_a_readable_message() {
+        let root = temp_dir("plain");
+        let plain = root.join("random.exe");
+        std::fs::write(&plain, b"not a package at all, definitely too short").unwrap();
+        let err = payload_from_path(&plain).unwrap_err().to_string();
+        assert!(err.contains("不是有效的单文件包") || err.contains("magic"), "{err}");
+
+        // 长度够但没有 magic 的情况也要拒绝。
+        let big = root.join("big.bin");
+        std::fs::write(&big, vec![7u8; TRAILER_LEN as usize + 16]).unwrap();
+        let err = payload_from_path(&big).unwrap_err().to_string();
+        assert!(err.contains("magic"), "{err}");
     }
 }

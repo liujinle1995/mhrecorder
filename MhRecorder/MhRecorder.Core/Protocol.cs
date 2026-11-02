@@ -10,7 +10,7 @@ public static class ProtocolConstants
 {
     public const string PipeName = "mhrecorder.v1";
     public const int Version = 1;
-    public const string AppVersion = "0.10.0";
+    public const string AppVersion = "0.11.0";
 }
 
 /// <summary>Canonical method names (mirror of `protocol::method`).</summary>
@@ -31,7 +31,17 @@ public static class Methods
     public const string ExportJson = "export.json";
     public const string ExportCsv = "export.csv";
     public const string ExportZip = "export.zip";
+
+    /// <summary>Full backup: JSON + SQLite file + manifest, one restorable zip.</summary>
+    public const string ExportBackup = "export.backup";
+
     public const string DataClear = "data.clear";
+
+    /// <summary>Running + recent recognition tasks (elapsed time, outcome).</summary>
+    public const string TasksList = "tasks.list";
+
+    /// <summary>Ask the backend to stop a running recognition at the next image.</summary>
+    public const string TasksCancel = "tasks.cancel";
 }
 
 /// <summary>Error codes the client switch-cases on (mirror of `protocol::errcode`).</summary>
@@ -44,6 +54,21 @@ public static class ErrorCodes
     public const string Storage = "storageFailed";
     public const string Io = "ioFailed";
     public const string Internal = "internal";
+
+    /// <summary>Client and backend speak different protocol versions.</summary>
+    public const string ProtocolMismatch = "protocolMismatch";
+
+    /// <summary>The call was cancelled (user pressed 取消, or the task list says so).</summary>
+    public const string Cancelled = "cancelled";
+
+    /// <summary>The call exceeded the backend's execution budget.</summary>
+    public const string Timeout = "timeout";
+
+    /// <summary>Payload too large: too many images, too many pixels, too many bytes.</summary>
+    public const string TooLarge = "tooLarge";
+
+    /// <summary>All backend connections are in use.</summary>
+    public const string TooManyConnections = "tooManyConnections";
 }
 
 public sealed class WireRequest

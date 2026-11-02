@@ -82,7 +82,13 @@ pub mod method {
     pub const EXPORT_JSON: &str = "export.json";
     pub const EXPORT_CSV: &str = "export.csv";
     pub const EXPORT_ZIP: &str = "export.zip";
+    /// 完整备份：JSON + SQLite 文件 + 清单。
+    pub const EXPORT_BACKUP: &str = "export.backup";
     pub const DATA_CLEAR: &str = "data.clear";
+    /// 正在跑的任务（含耗时），给"识别中"面板和诊断用。
+    pub const TASKS_LIST: &str = "tasks.list";
+    /// 请求取消一个任务；识别会在下一张图之前停下。
+    pub const TASKS_CANCEL: &str = "tasks.cancel";
 }
 
 /// Error codes the client switch-cases on.
@@ -94,6 +100,16 @@ pub mod errcode {
     pub const STORAGE: &str = "storageFailed";
     pub const IO: &str = "ioFailed";
     pub const INTERNAL: &str = "internal";
+    /// 两端协议版本不一致，直接拒绝服务。
+    pub const PROTOCOL_MISMATCH: &str = "protocolMismatch";
+    /// 被调用方取消。
+    pub const CANCELLED: &str = "cancelled";
+    /// 超过执行预算。
+    pub const TIMEOUT: &str = "timeout";
+    /// 超过大小 / 数量限制。
+    pub const TOO_LARGE: &str = "tooLarge";
+    /// 连接数已满。
+    pub const TOO_MANY_CONNECTIONS: &str = "tooManyConnections";
 }
 
 #[cfg(test)]
@@ -131,5 +147,7 @@ mod tests {
     #[test]
     fn method_names_are_stable() {
         assert_eq!(method::CHARACTERS_LIST, "characters.list");
+        assert_eq!(method::EXPORT_BACKUP, "export.backup");
+        assert_eq!(method::TASKS_CANCEL, "tasks.cancel");
     }
 }

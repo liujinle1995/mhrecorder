@@ -19,8 +19,7 @@ Windows 原生桌面应用，用于自动识别《梦幻西游手游》截图中
 ┌──────────────────▼──────────────────────────┐
 │  mhservice.exe    (Rust)                     │
 │   ├── mhvision    OpenCV + ONNX Runtime      │
-│   │               PP-OCRv4 det/rec, pHash,   │
-│   │               ORB, HSV 直方图            │
+│   │               OCR / 分类 / 特征 / 关联    │
 │   └── mhstore     SQLite (rusqlite bundled)  │
 └─────────────────────────────────────────────┘
 ```
@@ -32,8 +31,29 @@ Windows 原生桌面应用，用于自动识别《梦幻西游手游》截图中
 | 数据库 | SQLite（WAL 模式，内嵌编译） |
 | 图像处理 | OpenCV 4.12（`opencv_world4120`，vendor） |
 | OCR | RapidOCR / PP-OCRv4 ONNX，ONNX Runtime 1.31 CPU 推理 |
-| 特征识别 | pHash（9×8 差分哈希）+ ORB + HSV 32 桶直方图 |
+| 特征识别 | dHash（9×8 差分哈希）+ ORB（双向匹配 + RANSAC）+ HSV（色相/饱和/亮度）|
 | 通信 | Windows 命名管道，行分隔 JSON |
+
+### Rust 后端的模块划分
+
+`mhvision` 以前是一个 4000 行的 `lib.rs`，换个阈值要在 OpenCV 调用和 OCR
+会话管理之间来回翻。现在按"改动频率"拆开：
+
+| 模块 | 职责 |
+|---|---|
+| `types` | 错误类型、任务控制口、OCR 行 |
+| `imgops` | 解码、BGR Mat 转换 |
+| `features` | dHash / ORB（双向 + RANSAC）/ HSV 直方图 |
+| `classify` | 界面分类、面板定位（Otsu + 投影） |
+| `thumbnail` | 32×32 面板缩略图相似度 |
+| `identity` | 多证据加权、冲突保护、昵称歧义 |
+| `appearance` | 发色 / 武器特征 |
+| `ocr` | PP-OCRv4 检测 + 识别 |
+| `extract` | 从 OCR 行里抠字段（属性、货币、背包……） |
+| `pipeline` | 串成一次调用，并在图间检查取消 / 超时 |
+
+`mhstore` 同样按仓储拆：`characters` / `snapshots` / `identity` / `items` /
+`settings` / `cache` / `export` / `maintenance` / `migrations`。
 
 ## 目录
 
@@ -42,9 +62,9 @@ mhrecorder/
 ├─ src/                    Rust workspace
 │  └─ crates/
 │     ├─ mhcore/           领域模型 + 管道协议（前后端契约）
-│     ├─ mhvision/         图像 / OCR / 特征
-│     ├─ mhstore/          SQLite 持久化
-│     ├─ mhservice/        命名管道服务端 + 方法分发
+│     ├─ mhvision/         图像流水线，按职责分 10 个模块（见下）
+│     ├─ mhstore/          SQLite 持久化：仓储式拆分 + migrations/*.sql
+│     ├─ mhservice/        管道服务端：分发 / 边界 / 任务生命周期
 │     └─ mhcli/            独立测试 CLI（无需 UI）
 ├─ MhRecorder/             C# 解决方案
 │  ├─ MhRecorder.Core/     模型 / 管道客户端 / ViewModel
@@ -213,6 +233,17 @@ $env:MH_DUMP_CAPTURE = 'D:\tmp\caps'   # 界面里每次截图都落盘一份原
 .\src\target\release\mhcli.exe compare  samples\character_haitaotao.png samples\character_haitaotao.png
 .\src\target\release\mhcli.exe db-list
 .\src\target\release\mhcli.exe db-stats
+.\src\target\release\mhcli.exe db-tasks 20        # 任务历史（耗时 / 成功与否）
+.\src\target\release\mhcli.exe backup out.zip     # 完整备份（JSON + 库 + 清单）
+.\src\target\release\mhcli.exe eval samples\dataset --json report.json
+```
+
+`eval` 把数据集跑一遍并打分：目录下每个子目录是一例（`expect.json` + 若干
+截图），逐字段比较昵称 / 游戏ID / 金币 / 银币 / 面板类型；任一例失败退出码
+就是 1，可以直接挂进 CI。`expect.json` 只写关心的字段，没写的字段不参与比较。
+
+```json
+{ "nickname": "莫莫莫", "gameId": "429277361", "gold": 2625812, "screen": "bag" }
 ```
 
 管道协议也可用 `--stdio` 模式直接喂 JSON：
@@ -221,10 +252,22 @@ $env:MH_DUMP_CAPTURE = 'D:\tmp\caps'   # 界面里每次截图都落盘一份原
 '{"id":1,"method":"ping","params":{}}' | .\src\target\release\mhservice.exe --stdio
 ```
 
-## 数据位置
+## 数据位置与备份
 
 默认 `%LOCALAPPDATA%\MhRecorder\mhrecorder.db`（可用 `MH_DATA_DIR` 覆盖）。
 设置页可导出 JSON / CSV / ZIP，也可清空本地数据。
+
+**两种导出的口径不同，别混用：**
+
+| 形式 | 内容 | 用途 |
+|---|---|---|
+| JSON / CSV（`export.json` / `export.csv`） | 角色、属性、货币、装备、背包 + 指纹 / 外观 / 物品字典 | 看、分析、喂给别的工具 |
+| 完整备份（`export.backup`） | 上面的 JSON + **整个 SQLite 文件** + 清单 | 换电脑、重装后原样恢复 |
+
+完整备份里必须带上 `fingerprints` / `appearances`：它们才是"包裹截图认得人"的
+依据，丢了就等于把积累的识别能力清零，而这部分最难重建。数据库快照用
+`VACUUM INTO` 生成，而不是直接拷文件——WAL 模式下直接复制主文件会漏掉还没
+checkpoint 的事务。
 
 ## 单文件分发
 
@@ -473,6 +516,75 @@ WinUI 3 / Windows App SDK 无法静态打包成一个文件，原因有三：
 ```
 
 环比同样只在两天都有该字段时才计算，否则显示「—」。
+
+## 后端工程化（0.11）
+
+### 数据库迁移：版本化，不再"每次启动重跑建表"
+
+`mhstore/migrations/` 下每个文件是一步迁移，编号即版本，编译期嵌入二进制。
+版本号存在 `PRAGMA user_version` 里，每一步单独一个事务：
+
+1. 读当前版本；
+2. 库比程序**新**就拒绝打开（旧程序不许写新结构）；
+3. 逐条执行 `version > current` 的迁移，任一步失败整步回滚，版本号不前进；
+4. 迁移后自检：代码要用的表和列必须真的存在。
+
+```
+001_initial.sql              字符/快照/设置/特征缓存
+002_character_fingerprints   面板视觉指纹
+003_character_appearance     发色 / 武器
+004_item_database            物品字典 + 谁见过它
+005_recognition_tasks        识别任务历史
+```
+
+`001` 刻意全部用 `IF NOT EXISTS`：0.10.0 及更早的库从没写过 `user_version`，
+第一次被新引擎打开时版本是 0，会从头重放一遍，必须幂等。
+
+### IPC 边界：一行最多多大，说清楚
+
+| 上限 | 默认 | 环境变量 |
+|---|---|---|
+| 单行请求 | 32 MB | `MH_MAX_MESSAGE_MB` |
+| 一次几张图 | 8 | `MH_MAX_IMAGES` |
+| 单图像素 | 40 MP | `MH_MAX_IMAGE_MP` |
+| 单图字节 | 48 MB | `MH_MAX_IMAGE_MB` |
+| 并发连接 | 8 | `MH_MAX_CONNECTIONS` |
+| 单次识别时长 | 180 s | `MH_REQUEST_TIMEOUT_SEC` |
+
+读行改成有界实现：超过上限就把这一行读到换行处丢弃，回一条
+`tooLarge`，连接照常可用——`read_line` 会把缓冲区一直撑到换行出现，客户端
+一个 bug 就能让服务端吃光内存。
+
+图片检查从便宜到贵逐级做：张数 → base64 估算字节（不解码）→ 真实字节 →
+**图片头里的像素数**。最后一项防解压炸弹：几百 KB 的 PNG 能解出两亿像素。
+
+协议版本不兼容时明确拒绝（`protocolMismatch`），而不是拿半懂的格式继续跑。
+
+### 任务生命周期
+
+每次 `recognize` 在服务端登记一个任务：开始时间、耗时、结果。运行中可以通过
+`tasks.list` 看到，通过 `tasks.cancel` 请求取消——识别在**每张图之间**检查
+取消标志与截止时间，所以延迟上限是一张图（这也是用户能感知的粒度）。
+结束后写一行到 `recognition_tasks`，崩过一次之后能回答"上次跑到哪一步、
+花了多久"，而不是只剩一行 stderr。
+
+### 特征算法：先把名字改对
+
+原来的 `compute_phash` 其实是 **dHash**（缩到 9×8，比相邻像素），里面没有
+任何余弦变换。名字错了，围绕"调 pHash 阈值"的讨论就全在讨论一个不是 pHash
+的数。现在叫 `compute_dhash`。
+
+ORB 的匹配也补了两件事：
+
+* **双向**：i 认 j 最近，j 也必须认 i 最近，单向的偶然匹配丢掉；
+* **几何验证**：用 RANSAC 拟合相似变换（缩放 + 旋转 + 平移），只统计落在
+  模型上的点。相似纹理（同一套 UI 边框、同一个图标网格）以前能刷出虚高的
+  分数，现在过不了这一步。分数同时要求"比例高"和"内点够多"（≥15）。
+
+HSV 直方图从"只看色相"改成三段：色相（按饱和度×亮度加权）+ 饱和度 + 亮度。
+深蓝的袍子和亮蓝的旗子以前落进同一个桶，现在靠后两段分得开。
+
+缓存键带算法版本前缀（`v2:<hash>`），换算法后老条目自然失效。
 
 ## 设计稿
 
