@@ -25,6 +25,7 @@
 //! 公开接口通过下面的 `pub use` 保持稳定：`mhservice` 与 `mhcli` 只依赖这些
 //! 名字，内部怎么分文件它们不关心。
 
+mod analysis;
 mod appearance;
 mod classify;
 mod extract;
@@ -57,6 +58,9 @@ pub(crate) mod prelude {
     pub use std::sync::OnceLock;
 }
 
+pub use analysis::{content_hash, ImageAnalysis};
+/// 分析算法版本（缓存键前缀 / 导出清单用），定义在 `mhcore`。
+pub use mhcore::ANALYSIS_VERSION;
 pub use appearance::{appearance_for_capture, appearance_signature};
 pub use classify::{classify_screen, locate_panel, PanelBox};
 pub use features::{
@@ -65,7 +69,7 @@ pub use features::{
 pub use identity::{associate_by_evidence, MatchPolicy, VisualAssociation};
 pub use imgops::decode_image;
 pub use ocr::OcrEngine;
-pub use pipeline::RecognitionPipeline;
+pub use pipeline::{BatchOutcome, RecognitionPipeline};
 pub use thumbnail::{panel_thumb, thumb_similarity, THUMB_SIDE};
 pub use types::{JobControl, NoControl, OcrLine, Result, VisionError};
 

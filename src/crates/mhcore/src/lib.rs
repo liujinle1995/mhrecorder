@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod protocol;
 
+pub use protocol::{ANALYSIS_VERSION, PROTOCOL_VERSION};
+
 /// Which kind of game screenshot an image was classified as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

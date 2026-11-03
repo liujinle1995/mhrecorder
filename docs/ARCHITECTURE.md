@@ -135,12 +135,29 @@ MhRecorder.App/                  只做"画"和"把平台能力接进来"
 3. **页面不写业务判断**：能不能保存、改过的值怎么入库、身份不明要不要拦，都在 VM。
 4. 视觉计算（轮播三张卡的位置、柱状图坐标、缩放平移）留在视图，那是"怎么画"。
 
+### 后端状态：三种，不许含糊
+
+`BackendService.State` 是 "当前数据从哪来" 的唯一答案：
+
+| 状态 | 触发条件 | 界面表现 |
+|---|---|---|
+| `Ready` | 命名管道握手成功 | 正常，无横幅 |
+| `Demo` | **仅调试构建** + `MH_FORCE_DEMO=1` | 标题栏黄条「演示数据…不会落库」 |
+| `Unavailable` | 正式构建连不上后端 | 红色横幅 + 识别/保存/导出拒绝执行 |
+
+正式构建里 `MH_FORCE_DEMO` 会被**忽略并写日志**：一个环境变量能让发布版"看起来
+在记录数据"是设计缺陷，不是方便。`Unavailable` 时 `Api` 是 `UnavailableAppService`，
+每个方法都抛 `BackendUnavailableException`——返回空数据会被误读成"库是空的"。
+
+启动器（`mhpack::launch`）是另一个关卡：后端进程起不来、或 20 秒内没建立管道，
+就弹原生对话框说明原因（含日志路径与杀毒白名单提示）并退出，不再"照常拉起界面"。
+
 调试开关（仅开发用）：
 
-| 环境变量 | 作用 |
-|---|---|
-| `MH_FORCE_DEMO=1` | 忽略命名管道，强制用内存演示后端 |
-| `MH_DEMO_IMAGE=<png>` | 演示模式下把这张截图垫在识别结果下面，便于调审核界面 |
+| 环境变量 | 作用 | 生效范围 |
+|---|---|---|
+| `MH_FORCE_DEMO=1` | 忽略命名管道，强制用内存演示后端 | **仅调试构建** |
+| `MH_DEMO_IMAGE=<png>` | 演示模式下把这张截图垫在识别结果下面，便于调审核界面 | 仅调试构建 |
 
 ## 识别审核工作区
 
@@ -167,6 +184,23 @@ MhRecorder.App/                  只做"画"和"把平台能力接进来"
 - 点图上的框 → 选中表格对应行并滚到可见。
 - 识别完成后自动选中**置信度最低**的字段，先看最可能错的那一项。
 - 缩放到 55% 以下隐藏框标签，只留框，避免标签糊成一团。
+
+## 图像分析缓存
+
+```
+图片字节 → sha256 → "v{ANALYSIS_VERSION}:{hash}" → image_features.payload
+    命中 → 反序列化 → dHash 复核 → 复用 OCR 行（跳过 OCR）
+    未命中 → OCR → ImageAnalysis{version,dhash,hsvHist,lines} → 写回 → prune
+```
+
+* 版本常量在 `mhcore::ANALYSIS_VERSION`（mhvision 与 mhstore 都要看同一个数字，
+  PING 的 `algorithmVersion` 与导出清单也用它）。改特征算法或换 OCR 模型就 +1。
+* 缓存边界划在 OCR：`merge_adjacent_fragments`、字段提取、身份关联、审核框每次都重跑。
+  所以"改了提取规则"不需要清缓存，"换了模型/特征算法"必须 +1。
+* `ImageAnalysis::matches_image` 命中后用 dHash 复核；不一致按未命中处理。
+* 写入失败只记日志（缓存是优化，不该让识别结果作废）；`MAX_IMAGE_FEATURES = 2000`。
+* `BatchOutcome { result, cached_screens, computed }` 把"哪些命中、哪些新算"交给
+  `mhservice`：流水线不碰存储，落库策略属于服务层。
 
 ## 窗口尺寸策略
 

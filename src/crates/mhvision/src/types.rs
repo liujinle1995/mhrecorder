@@ -43,7 +43,11 @@ pub struct NoControl;
 impl JobControl for NoControl {}
 
 /// One recognised text line from the OCR engine, in screen coordinates.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serialisable because the analysis cache stores raw OCR lines: they are the
+/// expensive part of a run, and they depend only on the pixels.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OcrLine {
     pub text: String,
     /// 0.0 - 1.0 recognition confidence.

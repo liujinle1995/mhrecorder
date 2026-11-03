@@ -56,6 +56,7 @@
                             <ToggleSwitch HorizontalAlignment="Right" VerticalAlignment="Center"
                                           Style="{StaticResource DesignToggleStyle}"
                                           AutomationProperties.AutomationId="EditableBeforeSaveToggle"
+                                          IsEnabled="{x:Bind ViewModel.IsSettingsEditable, Mode=OneWay}"
                                           IsOn="{x:Bind ViewModel.EditableBeforeSave, Mode=TwoWay}" />
                         </Grid>
                     </Border>
@@ -67,6 +68,7 @@
                             <ToggleSwitch HorizontalAlignment="Right" VerticalAlignment="Center"
                                           Style="{StaticResource DesignToggleStyle}"
                                           AutomationProperties.AutomationId="AutoNavigateToggle"
+                                          IsEnabled="{x:Bind ViewModel.IsSettingsEditable, Mode=OneWay}"
                                           IsOn="{x:Bind ViewModel.AutoNavigateAfterSave, Mode=TwoWay}" />
                         </Grid>
                     </Border>
@@ -100,6 +102,7 @@
                                     Style="{StaticResource GhostButtonStyle}"
                                     HorizontalAlignment="Right" VerticalAlignment="Center"
                                     AutomationProperties.AutomationId="ExportJsonButton"
+                                          IsEnabled="{x:Bind ViewModel.IsSettingsEditable, Mode=OneWay}"
                                     Command="{x:Bind ViewModel.ExportJsonCommand}" />
                         </Grid>
                     </Border>
@@ -112,6 +115,7 @@
                                     Style="{StaticResource GhostButtonStyle}"
                                     HorizontalAlignment="Right" VerticalAlignment="Center"
                                     AutomationProperties.AutomationId="ExportCsvButton"
+                                          IsEnabled="{x:Bind ViewModel.IsSettingsEditable, Mode=OneWay}"
                                     Command="{x:Bind ViewModel.ExportCsvCommand}" />
                         </Grid>
                     </Border>
@@ -130,6 +134,7 @@
                                     Style="{StaticResource GhostButtonStyle}"
                                     HorizontalAlignment="Right" VerticalAlignment="Center"
                                     AutomationProperties.AutomationId="BackupButton"
+                                          IsEnabled="{x:Bind ViewModel.IsSettingsEditable, Mode=OneWay}"
                                     Command="{x:Bind ViewModel.BackupCommand}" />
                         </Grid>
                     </Border>
@@ -145,6 +150,7 @@
                                     Style="{StaticResource DangerOutlineButtonStyle}"
                                     HorizontalAlignment="Right" VerticalAlignment="Center"
                                     AutomationProperties.AutomationId="ClearDataButton"
+                                          IsEnabled="{x:Bind ViewModel.IsSettingsEditable, Mode=OneWay}"
                                     Command="{x:Bind ViewModel.ClearDataCommand}" />
                         </Grid>
                     </Border>

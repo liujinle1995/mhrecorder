@@ -989,3 +989,83 @@ fn regions_point_at_the_box_that_produced_each_field() {
     assert!(at("hp").confidence > 0.9);
     assert!(!at("hp").label.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// 分析缓存（内容寻址 + 算法版本 + 自校验）
+// ---------------------------------------------------------------------------
+
+/// SHA-256 用标准测试向量钉死：缓存键是这个值的十六进制，写错了不会报错，
+/// 只会所有图都"未命中"，看起来像缓存没生效。
+#[test]
+fn content_hash_matches_the_sha256_test_vector() {
+    assert_eq!(
+        crate::content_hash(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        crate::content_hash(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    // 差一个字节就是另一个键——这是"同一张图"的唯一定义。
+    assert_ne!(crate::content_hash(b"abc"), crate::content_hash(b"abd"));
+}
+
+#[test]
+fn analysis_roundtrips_through_the_cache_payload() {
+    let img = panel_like_image();
+    let lines = vec![
+        OcrLine { text: "气血".into(), confidence: 0.93, rect: (10, 20, 30, 14) },
+        OcrLine { text: "5604/5604".into(), confidence: 0.99, rect: (60, 20, 80, 13) },
+    ];
+    let analysis = ImageAnalysis::compute(&img, lines.clone()).unwrap();
+    assert_eq!(analysis.version, mhcore::ANALYSIS_VERSION);
+    assert!(analysis.matches_image(&img), "自己算出来的必须能复核通过");
+
+    let payload = analysis.encode().unwrap();
+    let back = ImageAnalysis::decode(&payload).expect("同版本 payload 必须能读回");
+    assert_eq!(back.dhash, analysis.dhash);
+    assert_eq!(back.lines, lines);
+    assert_eq!(back.hsv_hist.len(), HUE_BINS + SAT_BINS + VAL_BINS);
+    assert_eq!((back.width, back.height), (img.width(), img.height()));
+}
+
+/// 换了算法版本之后，老 payload 必须**读不回来**（当作未命中重算），
+/// 而不是被当成合法的旧结果继续用。
+#[test]
+fn analysis_payload_from_another_version_is_not_reused() {
+    let img = panel_like_image();
+    let analysis = ImageAnalysis::compute(&img, Vec::new()).unwrap();
+
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&analysis.encode().unwrap()).unwrap();
+    doc["version"] = serde_json::json!(mhcore::ANALYSIS_VERSION - 1);
+    assert!(ImageAnalysis::decode(&doc.to_string()).is_none(), "旧版本必须失效");
+
+    // 直方图长度不对同样不认（防止半截写坏的行被读出来当特征用）。
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&analysis.encode().unwrap()).unwrap();
+    doc["hsvHist"] = serde_json::json!([0.5, 0.5]);
+    assert!(ImageAnalysis::decode(&doc.to_string()).is_none(), "形状不对必须失效");
+}
+
+/// 缓存条目自校验：尺寸或像素对不上就不算命中。
+#[test]
+fn analysis_rejects_an_image_that_is_not_the_one_it_came_from() {
+    let img = panel_like_image();
+    let analysis = ImageAnalysis::compute(&img, Vec::new()).unwrap();
+
+    let other = image::RgbaImage::from_pixel(64, 64, image::Rgba([20, 30, 40, 255]));
+    assert!(!analysis.matches_image(&other), "尺寸不同必须拒绝");
+
+    // 同尺寸、不同内容：dHash 必须能分辨（纯色块之间差异很大）。
+    let same_size = image::RgbaImage::from_pixel(img.width(), img.height(), image::Rgba([10, 200, 90, 255]));
+    assert!(!analysis.matches_image(&same_size), "同尺寸不同内容必须拒绝");
+}
+
+/// 有点纹理的合成面板：纯色图的 dHash 全 0，测不出"内容不同"。
+fn panel_like_image() -> image::RgbaImage {
+    image::RgbaImage::from_fn(200, 120, |x, y| {
+        let v = ((x * 7 + y * 13) % 256) as u8;
+        image::Rgba([v, v / 2, 255 - v, 255])
+    })
+}

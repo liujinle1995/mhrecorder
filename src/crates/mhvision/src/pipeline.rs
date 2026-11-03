@@ -4,6 +4,7 @@
 //! 之间检查取消 / 超时。
 
 use crate::prelude::*;
+use crate::analysis::ImageAnalysis;
 use crate::appearance::{appearance_signature, crop_rgba};
 use crate::classify::{classify_from_lines, classify_screen, locate_panel};
 use crate::extract::{
@@ -27,6 +28,18 @@ use crate::thumbnail::panel_thumb;
 /// High-level pipeline: decode -> classify -> OCR -> field extraction.
 pub struct RecognitionPipeline {
     engine: OcrEngine,
+}
+
+/// 一次批量识别的产物：结果 + 缓存账本。
+///
+/// 账本交给调用方（`mhservice`）去落库：流水线不持有存储，缓存是否写入、
+/// 写多少条上限，都属于"服务层怎么用这份结果"的问题。
+pub struct BatchOutcome {
+    pub result: RecognitionResult,
+    /// 真正用了缓存的图下标（对应传入的 `cache`）。
+    pub cached_screens: Vec<usize>,
+    /// 本次算出来的分析，需要调用方写回缓存。
+    pub computed: Vec<(usize, ImageAnalysis)>,
 }
 
 impl RecognitionPipeline {
@@ -55,12 +68,34 @@ impl RecognitionPipeline {
         refs: &[IdentityRef],
         control: &dyn JobControl,
     ) -> Result<RecognitionResult> {
+        self.recognize_batch_cached(images, &[], known, refs, control)
+            .map(|outcome| outcome.result)
+    }
+
+    /// Recognize a batch, reusing per-image analysis from `cache`.
+    ///
+    /// `cache[i]` is the analysis previously computed for `images[i]`, keyed by
+    /// the SHA-256 of its bytes. A hit skips OCR — the expensive step — while
+    /// everything after it (fragment merging, field extraction, identity
+    /// association, review boxes) still runs, so changing an extractor does not
+    /// require invalidating the cache.
+    pub fn recognize_batch_cached(
+        &mut self,
+        images: &[image::RgbaImage],
+        cache: &[Option<ImageAnalysis>],
+        known: &[Character],
+        refs: &[IdentityRef],
+        control: &dyn JobControl,
+    ) -> Result<BatchOutcome> {
         if images.is_empty() {
             return Err(VisionError::Ocr("empty batch".into()));
         }
 
         let mut result = RecognitionResult::new(IdentitySource::VisualMatch);
         result.screenshot_count = images.len();
+
+        let mut cached_screens: Vec<usize> = Vec::new();
+        let mut computed: Vec<(usize, ImageAnalysis)> = Vec::new();
 
         let mut all_lines: Vec<OcrLine> = Vec::new();
         let mut stats_merged = CombatStats::default();
@@ -90,12 +125,31 @@ impl RecognitionPipeline {
             };
             let work: &image::RgbaImage = cropped.as_ref().unwrap_or(img);
 
-            let lines = match self.engine.recognize(work) {
-                Ok(l) => l,
-                Err(e) => {
-                    result.screens.push(classify_screen(work));
-                    result.warnings.push(format!("OCR 失败：{e}"));
-                    continue;
+            // 缓存命中就跳过 OCR。命中之后仍用 dHash 复核"这条缓存确实是这张
+            // 图算出来的"，不一致就当未命中——宁可多花两秒，不能用错行。
+            let hit = cache
+                .get(screen_index)
+                .and_then(Option::as_ref)
+                .filter(|analysis| analysis.matches_image(work));
+
+            let lines = if let Some(analysis) = hit {
+                cached_screens.push(screen_index);
+                analysis.lines.clone()
+            } else {
+                match self.engine.recognize(work) {
+                    Ok(l) => {
+                        // 先把能缓存的存下来：哪怕后面提取出错，这份 OCR 也值得留。
+                        match ImageAnalysis::compute(work, l.clone()) {
+                            Ok(analysis) => computed.push((screen_index, analysis)),
+                            Err(e) => tracing::debug!("analysis cache skipped: {e}"),
+                        }
+                        l
+                    }
+                    Err(e) => {
+                        result.screens.push(classify_screen(work));
+                        result.warnings.push(format!("OCR 失败：{e}"));
+                        continue;
+                    }
                 }
             };
             if lines.is_empty() {
@@ -401,7 +455,7 @@ impl RecognitionPipeline {
             mean.clamp(0.0, 1.0)
         };
 
-        Ok(result)
+        Ok(BatchOutcome { result, cached_screens, computed })
     }
 
     /// Feature extraction for caching, exposed for the service layer.

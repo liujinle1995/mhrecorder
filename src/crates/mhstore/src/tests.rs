@@ -315,7 +315,7 @@ fn export_document_carries_the_identity_material() {
     assert!(doc["settings"].is_object());
     assert!(doc["exportedAt"].is_number());
     // 算法/结构版本必须跟着走，否则换了算法再导入会拿旧分数当新分数比。
-    assert_eq!(doc["algorithmVersion"], cache::FEATURE_ALGO_VERSION);
+    assert_eq!(doc["algorithmVersion"], mhcore::ANALYSIS_VERSION);
     assert_eq!(doc["schemaVersion"].as_i64().unwrap(), schema_version());
 
     // 这三块是"换台电脑还认得人"的关键，缺一不可。
@@ -412,9 +412,36 @@ fn feature_cache_roundtrips_and_is_version_keyed() {
     assert_eq!(store.get_image_feature("abc").unwrap().unwrap(), "{\"dhash\":456}");
 
     // 换算法版本后键就变了，老条目不会被误读成新算法的结果。
-    let key = cache::feature_key("abc");
+    let key = cache::feature_key(mhcore::ANALYSIS_VERSION, "abc");
     assert!(key.ends_with(":abc"), "{key}");
-    assert!(key.starts_with(&format!("v{}:", cache::FEATURE_ALGO_VERSION)));
+    assert!(key.starts_with(&format!("v{}:", mhcore::ANALYSIS_VERSION)));
+
+    let older = cache::feature_key(mhcore::ANALYSIS_VERSION - 1, "abc");
+    store.put_image_feature(&older, "{\"dhash\":789}").unwrap();
+    assert!(store.get_image_feature(&key).unwrap().is_none(), "旧版本键不应命中新键");
+}
+
+/// 缓存不能无限长：只保留最近写入的若干条。
+#[test]
+fn feature_cache_prunes_to_the_newest_entries() {
+    let (mut store, _dir) = temp_store();
+    for i in 0..6 {
+        let key = cache::feature_key(mhcore::ANALYSIS_VERSION, &format!("img-{i}"));
+        store.put_image_feature(&key, "{\"v\":3}").unwrap();
+        // created_at 是毫秒；同一毫秒内写入时要靠 primary key 兜底排序，
+        // 这里显式等一下，让"最近"这件事有确定的顺序。
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(store.feature_cache_len().unwrap(), 6);
+
+    let removed = store.prune_image_features(4).unwrap();
+    assert_eq!(removed, 2);
+    assert_eq!(store.feature_cache_len().unwrap(), 4);
+
+    let newest = cache::feature_key(mhcore::ANALYSIS_VERSION, "img-5");
+    assert!(store.get_image_feature(&newest).unwrap().is_some(), "最新一条必须留下");
+    let oldest = cache::feature_key(mhcore::ANALYSIS_VERSION, "img-0");
+    assert!(store.get_image_feature(&oldest).unwrap().is_none(), "最旧一条被删");
 }
 
 #[test]

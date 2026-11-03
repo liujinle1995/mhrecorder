@@ -11,6 +11,7 @@
     <Grid x:Name="RootLayout" Background="{StaticResource WindowBackgroundBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -51,8 +52,23 @@
                        Foreground="{StaticResource TextTertiaryBrush}" />
         </Grid>
 
+        <!-- ============ Backend banner ============
+             没有后端时这里必须一直占着位置：识别、保存、导出都不可用，这比任何
+             一个页面的空状态都重要。演示数据同样挂着黄条，避免被当成真实记录。 -->
+        <!-- x:Bind 在 Window 上不走 FrameworkElement，绑定转换器会编译失败；
+             这里和标题栏/状态栏一样，由 code-behind 跟着 ViewModel 刷。 -->
+        <InfoBar x:Name="BackendNoticeBar" Grid.Row="1"
+                 AutomationProperties.AutomationId="BackendNoticeBar"
+                 IsClosable="False">
+            <InfoBar.ActionButton>
+                <Button x:Name="BackendNoticeButton"
+                        AutomationProperties.AutomationId="BackendNoticeRetry"
+                        Click="OnBackendNoticeActionClick" />
+            </InfoBar.ActionButton>
+        </InfoBar>
+
         <!-- ============ Body: sidebar + page host ============ -->
-        <Grid Grid.Row="1">
+        <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="SidebarColumn" Width="254" />
                 <ColumnDefinition Width="*" />
@@ -138,7 +154,7 @@
         </Grid>
 
         <!-- ============ Footer status bar ============ -->
-        <Grid Grid.Row="2" Height="40" Background="{StaticResource ChromeBackgroundBrush}">
+        <Grid Grid.Row="3" Height="40" Background="{StaticResource ChromeBackgroundBrush}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
@@ -147,7 +163,7 @@
 
             <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8"
                         VerticalAlignment="Center" Margin="30,0,0,0">
-                <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessGreenBrush}" VerticalAlignment="Center" />
+                <Ellipse x:Name="FooterDot" Width="7" Height="7" Fill="{StaticResource SuccessGreenBrush}" VerticalAlignment="Center" />
                 <TextBlock x:Name="FooterStatusText"
                            Text="已离线运行 · 数据存于本地 JSON"
                            FontSize="12"

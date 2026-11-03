@@ -22,6 +22,17 @@ use serde_json::Value;
 /// against a different major version.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// 识别分析（特征 + OCR）的算法版本。
+///
+/// 两个地方靠它判断"这份旧数据还能不能用"：`image_features` 的缓存键前缀
+/// （`v3:<sha256>`）和导出/备份清单里的 `algorithmVersion`。**改了 `mhvision`
+/// 的特征算法（dHash / ORB / HSV）或换了 OCR 模型，就把这里 +1**，老缓存会
+/// 自然失效，而不是被当成"合法的旧结果"读出来。
+///
+/// 放在 mhcore 是因为它同时属于存储层（缓存键、清单）和识别层（算法），
+/// 两边都必须看到同一个数字。
+pub const ANALYSIS_VERSION: u32 = 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {

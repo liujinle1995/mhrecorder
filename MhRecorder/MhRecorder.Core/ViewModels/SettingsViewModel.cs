@@ -58,12 +58,37 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private string _statusText = string.Empty;
 
+    /// <summary>
+    /// False when there is no backend: the page then shows the values as "—" and
+    /// every control is disabled, instead of rendering defaults that look like
+    /// real settings and then failing to save.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isSettingsEditable = true;
+
     partial void OnEditableBeforeSaveChanged(bool value) => PersistIfReady();
 
     partial void OnAutoNavigateAfterSaveChanged(bool value) => PersistIfReady();
 
     public async Task LoadAsync()
     {
+        // 没有后端时不要去"读设置"：读到的空对象会让开关看起来是关着的，
+        // 用户以为设置丢了，而这个页面本身什么都改不了。
+        if (!_backend.IsAvailable)
+        {
+            _loading = true;
+            IsSettingsEditable = false;
+            EngineText = "未连接（没有可用的后端）";
+            EngineVersionText = "—";
+            PluginDetailText = _backend.UnavailableReason ?? "后端未连接";
+            StatusText = "后端未连接：设置、导出与清空数据都不可用";
+            DataDir = "—";
+            ChangelogSummary = ChangelogSummaryOf();
+            _loading = false;
+            return;
+        }
+
+        IsSettingsEditable = true;
         _loading = true;
         try
         {
@@ -103,6 +128,8 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// </summary>
     private async Task LoadEngineInfoAsync()
     {
+        if (!_backend.IsAvailable) return;
+
         try
         {
             var info = await _backend.Api.GetEngineInfoAsync();
@@ -146,6 +173,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     private async void PersistIfReady()
     {
         if (_loading) return;
+
+        if (!_backend.IsAvailable)
+        {
+            StatusText = "后端未连接，设置改动不会保存";
+            return;
+        }
         _settings.EditableBeforeSave = EditableBeforeSave;
         _settings.AutoNavigateAfterSave = AutoNavigateAfterSave;
         try
@@ -213,9 +246,14 @@ public sealed partial class SettingsViewModel : ObservableObject
                     engineId = idEl.GetString() ?? "—";
             }
 
-            StatusText = _backend.IsRemote
-                ? $"已是最新版本 {ProtocolConstants.AppVersion}（本地离线版）· 识别插件 {engineId} {updatable}"
-                : $"当前为演示模式，版本 {ProtocolConstants.AppVersion} · 识别插件未连接";
+            StatusText = _backend.State switch
+            {
+                BackendState.Ready =>
+                    $"已是最新版本 {ProtocolConstants.AppVersion}（本地离线版）· 识别插件 {engineId} {updatable}",
+                BackendState.Demo =>
+                    $"当前为演示数据（未连接后端），版本 {ProtocolConstants.AppVersion} · 识别插件未连接",
+                _ => $"后端未连接，无法检查版本（当前 {ProtocolConstants.AppVersion}）",
+            };
         }
         catch (Exception ex)
         {

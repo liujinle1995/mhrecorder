@@ -69,12 +69,22 @@ public sealed partial class MainWindow : Window
                 case nameof(MainViewModel.FooterSnapshot):
                     FooterSnapshotText.Text = ViewModel.FooterSnapshot;
                     break;
+                case nameof(MainViewModel.HasBackendNotice):
+                case nameof(MainViewModel.BackendNotice):
+                case nameof(MainViewModel.BackendNoticeSeverity):
+                case nameof(MainViewModel.BackendNoticeAction):
+                    ApplyBackendNotice();
+                    break;
+                case nameof(MainViewModel.BackendNoticeBusy):
+                    BackendNoticeButton.IsEnabled = !ViewModel.BackendNoticeBusy;
+                    break;
             }
         };
 
         BackendBadge.Text = ViewModel.BackendBadge;
         FooterStatusText.Text = ViewModel.FooterStatus;
         FooterSnapshotText.Text = ViewModel.FooterSnapshot;
+        ApplyBackendNotice();
 
         RootLayout.SizeChanged += (_, e) => ApplyResponsiveLayout(e.NewSize.Width);
 
@@ -83,6 +93,36 @@ public sealed partial class MainWindow : Window
 
         AppWindow.Closing += (_, _) => App.Log("MainWindow closing");
     }
+
+    /// <summary>
+    /// 把后端状态铺到界面上：横幅（错误/警告）+ 底部状态点。
+    ///
+    /// 绿色点 + 一条横幅同时出现是不矛盾的：点说明"本地运行正常"，横幅说明
+    /// "但数据无处可去"。
+    /// </summary>
+    private void ApplyBackendNotice()
+    {
+        BackendNoticeBar.IsOpen = ViewModel.HasBackendNotice;
+        BackendNoticeBar.Message = ViewModel.BackendNotice;
+        BackendNoticeBar.Severity = ViewModel.BackendNoticeSeverity switch
+        {
+            "Error" => InfoBarSeverity.Error,
+            "Success" => InfoBarSeverity.Success,
+            _ => InfoBarSeverity.Warning,
+        };
+        BackendNoticeButton.Content = ViewModel.BackendNoticeAction;
+
+        var color = ViewModel.BackendNoticeSeverity switch
+        {
+            "Error" => Color.FromArgb(255, 0xE0, 0x3B, 0x2B),
+            "Warning" => Color.FromArgb(255, 0xE0, 0xA1, 0x2B),
+            _ => Color.FromArgb(255, 0x1F, 0xB4, 0x61),
+        };
+        FooterDot.Fill = new SolidColorBrush(color);
+    }
+
+    private void OnBackendNoticeActionClick(object sender, RoutedEventArgs e) =>
+        ViewModel.RetryBackendCommand.Execute(null);
 
     // ---------------- window sizing ----------------
 

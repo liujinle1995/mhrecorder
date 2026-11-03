@@ -282,6 +282,18 @@ public sealed partial class ImportViewModel : ObservableObject
 
     public string SelectedScreenLabel => SelectedImageTab?.Label ?? string.Empty;
 
+    /// <summary>
+    /// "这次有几张图没重新 OCR"。识别结果里本来就带 cacheHits，把条数翻成人话：
+    /// 用户看到"秒出"时会怀疑是不是跳过了什么，这里正面回答。
+    /// </summary>
+    [ObservableProperty]
+    private string _cacheNote = string.Empty;
+
+    /// <summary>One sentence explaining that nothing can be recorded right now.</summary>
+    private string BackendUnavailableText =>
+        _backend.UnavailableReason
+        ?? "未连接本地识别引擎，识别与保存都不可用。请退出后重新启动程序。";
+
     // ------------------------------------------------------------------
     // Commands — import
     // ------------------------------------------------------------------
@@ -422,6 +434,7 @@ public sealed partial class ImportViewModel : ObservableObject
         ShowOwnerPicker = false;
         PreviewBytes = null;
         PreviewCaption = string.Empty;
+        CacheNote = string.Empty;
         ConfidenceText = "—";
         ConfidenceRatio = 0;
         IdentityStateText = string.Empty;
@@ -485,6 +498,12 @@ public sealed partial class ImportViewModel : ObservableObject
     private async Task SaveAsync()
     {
         if (Result is null || IsBusy) return;
+
+        if (!_backend.IsAvailable)
+        {
+            ShowHint(BackendUnavailableText, "Error");
+            return;
+        }
 
         // An unidentified capture (a 包裹 screenshot has no 游戏ID) is saved
         // against whichever character the user picked. Without a pick there is
@@ -557,7 +576,9 @@ public sealed partial class ImportViewModel : ObservableObject
     /// </summary>
     public async Task LoadDemoAsync()
     {
-        if (Result is not null || _backend.IsRemote) return;
+        // 只有调试构建的演示后端才合成结果；正式构建没有后端时是"不可用"，
+        // 合成一张看起来正常的识别结果恰恰是最坏的行为。
+        if (Result is not null || !_backend.IsDemo) return;
 
         var bytes = Array.Empty<byte>();
         var name = "demo-character.png";
@@ -594,6 +615,12 @@ public sealed partial class ImportViewModel : ObservableObject
     private async Task<RecognitionResult?> RunRecognitionAsync(IReadOnlyList<ImageFile> batch, string source)
     {
         if (batch.Count == 0 || IsBusy) return null;
+
+        if (!_backend.IsAvailable)
+        {
+            ShowHint(BackendUnavailableText, "Error");
+            return null;
+        }
 
         BusyText = "正在识别截图…";
         IsBusy = true;
@@ -692,6 +719,14 @@ public sealed partial class ImportViewModel : ObservableObject
                 ImageTabs.Add(new ImageTabViewModel(i, $"截图 {i + 1}", "识别", result.Screens[i]));
             SelectedImageTab = ImageTabs[0];
         }
+
+        CacheNote = result.CacheHits.Count switch
+        {
+            0 => string.Empty,
+            var n when n >= result.ScreenshotCount && result.ScreenshotCount > 0 =>
+                $"这张截图上次已经分析过，本次直接复用了 OCR 结果（{n} 张命中缓存）",
+            var n => $"{n}/{Math.Max(result.ScreenshotCount, n)} 张截图复用了上次的 OCR 结果",
+        };
 
         RefreshFromResult(keepFields: false);
         _ = RefreshOwnersAsync(result);

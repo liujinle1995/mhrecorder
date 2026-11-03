@@ -308,11 +308,29 @@ pub fn launch() -> anyhow::Result<()> {
     }
 
     // The UI talks to the backend over the `mhrecorder.v1` named pipe. Start it
-    // first and wait for the pipe to appear, otherwise the UI would silently
-    // fall back to its in-memory demo data.
-    if service.exists() && !win::pipe_ready(PIPE_NAME) {
+    // first and wait for the pipe to appear.
+    //
+    // 等不到就**报错退出**，不再把界面拉起来让它自己说"离线演示数据"：那种
+    // 情况下用户以为在记录，其实什么都没落库。启动器是唯一知道"后端没起来"
+    // 这件事的地方，所以由它弹窗说清楚。
+    if !service.exists() {
+        anyhow::bail!(
+            "缺少后端程序 {SERVICE_EXE}（目录：{}）。发布包不完整，请重新解压或重新下载。",
+            dir.display()
+        );
+    }
+
+    if !win::pipe_ready(PIPE_NAME) {
         start_service(&service, &dir)?;
-        wait_for_pipe(std::time::Duration::from_secs(PIPE_TIMEOUT_SECS));
+        if !wait_for_pipe(std::time::Duration::from_secs(PIPE_TIMEOUT_SECS)) {
+            anyhow::bail!(
+                "后端 {SERVICE_EXE} 启动失败：等了 {PIPE_TIMEOUT_SECS} 秒仍未建立命名管道 \
+                 mhrecorder.v1。\n\n请尝试：\n\
+                 1. 关闭本提示后重新双击启动；\n\
+                 2. 把程序目录加入杀毒软件白名单（它会创建命名管道，可能被拦截）；\n\
+                 3. 查看日志 %LOCALAPPDATA%\\MhRecorder\\mhservice.log。"
+            );
+        }
     }
 
     let mut cmd = std::process::Command::new(&app);
@@ -335,15 +353,16 @@ fn start_service(exe: &Path, dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn wait_for_pipe(timeout: std::time::Duration) {
+/// 等后端把管道建起来。返回 `false` 表示等到超时——调用方必须把这件事报出去。
+fn wait_for_pipe(timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         if win::pipe_ready(PIPE_NAME) {
-            return;
+            return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(120));
     }
-    // Timed out: still launch the UI; it reports "离线演示数据" on its own.
+    win::pipe_ready(PIPE_NAME)
 }
 
 // ---------------------------------------------------------------------------

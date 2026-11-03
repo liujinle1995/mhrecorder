@@ -50,7 +50,7 @@ impl Store {
             "version": env!("CARGO_PKG_VERSION"),
             // 算法版本：把这份 JSON 拿到另一个（可能更新的）版本里做对比时，
             // 先看它——特征分数跨算法不可比。
-            "algorithmVersion": crate::cache::FEATURE_ALGO_VERSION,
+            "algorithmVersion": mhcore::ANALYSIS_VERSION,
             "schemaVersion": self.schema_version().unwrap_or(0),
             "exportedAt": now_ms(),
             "characters": characters.iter().map(|d| serde_json::json!({
@@ -78,7 +78,7 @@ impl Store {
             "settings": settings,
             "runtime": {
                 "schemaVersion": self.schema_version().unwrap_or(0),
-                "algorithmVersion": crate::cache::FEATURE_ALGO_VERSION,
+                "algorithmVersion": mhcore::ANALYSIS_VERSION,
             },
         }))
     }
@@ -103,7 +103,7 @@ impl Store {
         }
         Ok(serde_json::json!({
             "count": entries.len(),
-            "algorithmVersion": crate::cache::FEATURE_ALGO_VERSION,
+            "algorithmVersion": mhcore::ANALYSIS_VERSION,
             "entries": entries,
         }))
     }
@@ -164,7 +164,7 @@ impl Store {
             "format": "mhrecorder-backup/1",
             "appVersion": env!("CARGO_PKG_VERSION"),
             "schemaVersion": self.schema_version().unwrap_or(0),
-            "algorithmVersion": crate::cache::FEATURE_ALGO_VERSION,
+            "algorithmVersion": mhcore::ANALYSIS_VERSION,
             "createdAt": now_ms(),
             "includesDatabase": includes_database,
             "counts": {

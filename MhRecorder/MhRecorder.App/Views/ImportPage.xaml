@@ -308,6 +308,15 @@
                                    FontSize="11.5"
                                    TextTrimming="CharacterEllipsis"
                                    Foreground="{StaticResource TextSecondaryBrush}" />
+
+                        <!-- 复用上次的 OCR 结果时说清楚，别让"秒出"看起来像没干活 -->
+                        <TextBlock Text="{x:Bind ViewModel.CacheNote, Mode=OneWay}"
+                                   FontSize="11"
+                                   TextWrapping="Wrap"
+                                   AutomationProperties.AutomationId="CacheNoteText"
+                                   Visibility="{x:Bind ViewModel.CacheNote, Mode=OneWay, Converter={StaticResource NonEmptyToVisibility}}"
+                                   Foreground="{StaticResource SuccessGreenBrush}" />
+
                         <TextBlock Text="滚轮缩放 · 按住拖动平移 · 点击方框选中对应字段 · 双击适应窗口"
                                    FontSize="11"
                                    Foreground="{StaticResource TextTertiaryBrush}" />

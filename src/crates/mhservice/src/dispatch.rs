@@ -125,7 +125,7 @@ fn dispatch_inner(
             "version": env!("CARGO_PKG_VERSION"),
             "protocol": PROTOCOL_VERSION,
             "schemaVersion": state.with_store(|s| s.schema_version().ok()),
-            "algorithmVersion": mhstore::cache::FEATURE_ALGO_VERSION,
+            "algorithmVersion": mhvision::ANALYSIS_VERSION,
             "limits": {
                 "maxMessageBytes": state.limits.max_message_bytes,
                 "maxImages": state.limits.max_images,
@@ -294,11 +294,43 @@ fn recognize(
     let shots = decode_shots(&state.limits, images)?;
     let mut names = Vec::with_capacity(shots.len());
     let mut decoded = Vec::with_capacity(shots.len());
-    for shot in shots {
+    for shot in &shots {
         let img = mhvision::decode_image(&shot.bytes)
             .map_err(|e| DispatchError::new(errcode::DECODE, e.to_string()))?;
-        names.push(shot.name);
+        names.push(shot.name.clone());
         decoded.push(img);
+    }
+
+    // 图片字节的 SHA-256 是缓存键：同一张图无论隔多久、从哪条路径导入，
+    // 都落到同一条缓存上。算法版本进键前缀，升级后老条目自动不用。
+    let cache_keys: Vec<String> = shots
+        .iter()
+        .map(|shot| {
+            mhstore::cache::feature_key(
+                mhvision::ANALYSIS_VERSION,
+                &mhvision::content_hash(&shot.bytes),
+            )
+        })
+        .collect();
+
+    // 读缓存放在流水线锁之外：一次拿全，别在识别过程中反复抢存储锁。
+    let cached: Vec<Option<mhvision::ImageAnalysis>> = state.with_store(|s| {
+        cache_keys
+            .iter()
+            .map(|key| match s.get_image_feature(key) {
+                Ok(Some(payload)) => mhvision::ImageAnalysis::decode(&payload),
+                Ok(None) => None,
+                Err(e) => {
+                    // 缓存读失败只是没省下时间，不该让这次识别失败。
+                    tracing::warn!("feature cache lookup failed: {e}");
+                    None
+                }
+            })
+            .collect()
+    });
+    let hits_before = cached.iter().filter(|c| c.is_some()).count();
+    if hits_before > 0 {
+        tracing::info!("feature cache: {hits_before}/{} hit", cached.len());
     }
 
     let known: Vec<mhcore::Character> = state
@@ -312,10 +344,10 @@ fn recognize(
     // nickname — still be attributed to the right character.
     let refs = state.with_store(|s| s.list_identity_refs()).map_err(store_err)?;
 
-    let result = state
+    let outcome = state
         .with_pipeline(|p| match control {
-            Some(c) => p.recognize_batch_with(&decoded, &known, &refs, c),
-            None => p.recognize_batch_with(&decoded, &known, &refs, &mhvision::NoControl),
+            Some(c) => p.recognize_batch_cached(&decoded, &cached, &known, &refs, c),
+            None => p.recognize_batch_cached(&decoded, &cached, &known, &refs, &mhvision::NoControl),
         })
         .ok_or_else(|| DispatchError::new(errcode::OCR, "识别引擎不可用"))?
         .map_err(|e| match e {
@@ -331,6 +363,36 @@ fn recognize(
             ),
             other => DispatchError::new(errcode::OCR, other.to_string()),
         })?;
+
+    let mut result = outcome.result;
+    // 写回本次算出来的分析。写失败只记日志：缓存是优化，不该让识别结果作废。
+    if !outcome.computed.is_empty() {
+        state.with_store_mut(|s| {
+            let mut written = 0;
+            for (index, analysis) in &outcome.computed {
+                let Some(key) = cache_keys.get(*index) else { continue };
+                match analysis.encode() {
+                    Ok(payload) => match s.put_image_feature(key, &payload) {
+                        Ok(()) => written += 1,
+                        Err(e) => tracing::warn!("feature cache write failed: {e}"),
+                    },
+                    Err(e) => tracing::warn!("feature cache encode failed: {e}"),
+                }
+            }
+            if written > 0 {
+                if let Err(e) = s.prune_image_features(mhstore::cache::MAX_IMAGE_FEATURES) {
+                    tracing::warn!("feature cache prune failed: {e}");
+                }
+            }
+        });
+    }
+    // 只报告**真正用上**的条目：命中但被 dHash 复核否掉的会重新 OCR，
+    // 这时说"缓存命中"是在撒谎。
+    result.cache_hits = outcome
+        .cached_screens
+        .iter()
+        .filter_map(|index| cache_keys.get(*index).cloned())
+        .collect();
 
     let mut payload = serde_json::to_value(&result)
         .map_err(|e| DispatchError::new(errcode::INTERNAL, e.to_string()))?;
