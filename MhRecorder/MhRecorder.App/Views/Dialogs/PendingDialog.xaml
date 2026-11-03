@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ContentDialog
+    x:Class="MhRecorder.App.Views.Dialogs.PendingDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    CloseButtonText="关闭"
+    DefaultButton="None"
+    RequestedTheme="Light"
+    Background="{StaticResource CardBackgroundBrush}"
+    CornerRadius="16"
+    Padding="24,22,24,20">
+
+    <ContentDialog.Title>
+        <TextBlock Text="待归属的识别结果"
+                   FontFamily="{StaticResource UiDisplayFontFamily}"
+                   FontSize="17"
+                   FontWeight="SemiBold"
+                   Foreground="{StaticResource TextPrimaryBrush}" />
+    </ContentDialog.Title>
+
+    <StackPanel Spacing="12" Width="520">
+
+        <TextBlock Text="这些截图被识别出来了，但没有任何东西能说明它属于谁（既没有游戏ID，也没有昵称，视觉也对不上已知角色）。数据一直留着，指定一个角色就会补成正式记录。"
+                   FontSize="12.5"
+                   LineHeight="19"
+                   TextWrapping="Wrap"
+                   Foreground="{StaticResource TextSecondaryBrush}" />
+
+        <Grid Height="240">
+            <ListView x:Name="PendingList"
+                      SelectionMode="Single"
+                      SelectionChanged="OnSelectionChanged"
+                      AutomationProperties.AutomationId="PendingList">
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Spacing="3" Padding="0,5">
+                            <TextBlock Text="{Binding Title}"
+                                       FontSize="13.5"
+                                       Foreground="{StaticResource TextPrimaryBrush}" />
+                            <TextBlock Text="{Binding Detail}"
+                                       FontSize="11.5"
+                                       TextWrapping="Wrap"
+                                       Foreground="{StaticResource TextTertiaryBrush}" />
+                        </StackPanel>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+
+            <TextBlock x:Name="EmptyText"
+                       Text="没有待归属的记录"
+                       FontSize="12.5"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Foreground="{StaticResource TextTertiaryBrush}"
+                       Visibility="Collapsed" />
+        </Grid>
+
+        <Border Background="{StaticResource SubtleFillBrush}" CornerRadius="10" Padding="12,10">
+            <Grid ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- 不引用页内资源（SettingsLabelText 只存在于 SettingsPage 的资源字典里，
+                     对话框拿不到），直接写死这里用的两个属性。 -->
+                <TextBlock Grid.Column="0" Text="归到"
+                           FontSize="13.5"
+                           VerticalAlignment="Center"
+                           Foreground="{StaticResource TextPrimaryBrush}" />
+
+                <ComboBox x:Name="OwnerCombo"
+                          Grid.Column="1"
+                          HorizontalAlignment="Stretch"
+                          DisplayMemberPath="Label"
+                          PlaceholderText="选择角色"
+                          AutomationProperties.AutomationId="PendingOwnerCombo" />
+
+                <Button Grid.Column="2"
+                        Content="归属"
+                        Style="{StaticResource PrimaryButtonStyle}"
+                        Padding="14,6"
+                        Click="OnAssignClick"
+                        AutomationProperties.AutomationId="PendingAssignButton" />
+
+                <Button Grid.Column="3"
+                        Content="丢弃"
+                        Style="{StaticResource GhostButtonStyle}"
+                        Padding="12,6"
+                        Click="OnDiscardClick"
+                        AutomationProperties.AutomationId="PendingDiscardButton" />
+            </Grid>
+        </Border>
+
+        <TextBlock x:Name="StatusText"
+                   FontSize="12"
+                   TextWrapping="Wrap"
+                   Foreground="{StaticResource TextSecondaryBrush}" />
+    </StackPanel>
+</ContentDialog>

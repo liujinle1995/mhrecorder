@@ -296,11 +296,19 @@ fn run(args: &[String]) -> Result<()> {
                     result.character.game_id = Some(gid);
                 }
             }
-            let id = store.save_recognition(&result, &files)?;
-            println!(
-                "saved character {id} (identity={:?}, nickname={:?}, evidence={:?})",
-                result.identity_source, result.character.nickname, result.identity_evidence
-            );
+            match store.save_recognition(&result, &files)? {
+                mhstore::SaveOutcome::Saved { character_id, created } => println!(
+                    "saved character {character_id}{} (identity={:?}, nickname={:?}, evidence={:?})",
+                    if created { " [new]" } else { "" },
+                    result.identity_source,
+                    result.character.nickname,
+                    result.identity_evidence
+                ),
+                // 命令行没有"点一下选归属"这条路：打出来让人知道数据在哪儿。
+                mhstore::SaveOutcome::Pending { pending_id, reason } => println!(
+                    "saved as pending {pending_id}（{reason}）；可在界面的「待归属」里指定角色"
+                ),
+            }
             Ok(())
         }
         "export-json" => {

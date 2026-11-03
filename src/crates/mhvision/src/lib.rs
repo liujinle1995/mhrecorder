@@ -49,9 +49,10 @@ mod tests;
 pub(crate) mod prelude {
     pub use crate::types::{JobControl, NoControl, OcrLine, Result, VisionError};
     pub use mhcore::{
-        AttributeValue, Character, CombatStats, Currencies, EquipmentItem,
-        EvidenceKind, FieldRegion, IdentityCandidate, IdentityRef, IdentitySource, InventoryItem, MatchEvidence,
-        PanelFingerprint, RecognitionResult, ScreenKind,
+        AppearanceSignature, AttributeValue, BatchIdentity, Character, CombatStats, Currencies,
+        EquipmentItem, EvidenceKind, FieldRegion, IdentityCandidate, IdentityRef, IdentitySource,
+        InventoryItem, MatchEvidence, PanelFingerprint, RecognitionResult, RecognizedCharacter,
+        ScreenKind, ScreenResult,
     };
     pub use opencv::prelude::*;
     pub use std::path::Path;
@@ -66,7 +67,9 @@ pub use classify::{classify_screen, locate_panel, PanelBox};
 pub use features::{
     compare, extract_features, ImageFeatures, Similarity, HUE_BINS, SAT_BINS, VAL_BINS,
 };
-pub use identity::{associate_by_evidence, MatchPolicy, VisualAssociation};
+pub use identity::{
+    associate_by_evidence, plan_batch, BatchPlan, MatchPolicy, ScreenIdentity, VisualAssociation,
+};
 pub use imgops::decode_image;
 pub use ocr::OcrEngine;
 pub use pipeline::{BatchOutcome, RecognitionPipeline};

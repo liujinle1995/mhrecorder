@@ -29,6 +29,7 @@ use rusqlite::{Connection, Row};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+pub use characters::{PendingRecord, SaveOutcome};
 pub use migrations::schema_version;
 
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +40,8 @@ pub enum StoreError {
     NotFound(String),
     #[error("invalid data: {0}")]
     Invalid(String),
+    #[error("{0}")]
+    Identity(String),
     #[error("io error: {0}")]
     Io(String),
 }

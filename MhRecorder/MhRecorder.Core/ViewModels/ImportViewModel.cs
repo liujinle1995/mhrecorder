@@ -533,14 +533,26 @@ public sealed partial class ImportViewModel : ObservableObject
                 _savedIdentityFrom = owner.Label.Split(' ')[0];
             }
 
+            // 只把真正并进结果的截图记成来源：冲突时被排除的那张属于别人，
+            // 写进 source_screens 会让快照看起来覆盖了一堆它没有的图。
             var screens = _batch.Count > 0
-                ? _batch.Select(i => i.Name).ToList()
+                ? RecognitionService.MergedScreenNames(Result, _batch.Select(i => i.Name).ToList()).ToList()
                 : new List<string> { "character_attributes.png", "inventory.png" };
 
-            var id = await _recognition.SaveAsync(Result, screens);
-            if (string.IsNullOrEmpty(id))
+            var outcome = await _recognition.SaveAsync(Result, screens);
+            if (outcome.IsPending)
             {
-                ShowHint("保存失败：后端没有返回角色 ID", "Error");
+                // 不是失败：数据在，只是还没有主人。说清去哪儿认领。
+                RefreshFromResult(keepFields: true);
+                ShowHint(
+                    $"这次的截图没有任何身份信息，已存入「待归属」（{outcome.Message}）。"
+                    + "到「设置 → 数据」里指定角色即可，数据不会丢。",
+                    "Warning");
+                return;
+            }
+            if (!outcome.IsSaved)
+            {
+                ShowHint("保存失败：" + (outcome.Message ?? "后端没有返回角色 ID"), "Error");
                 return;
             }
 
@@ -764,6 +776,19 @@ public sealed partial class ImportViewModel : ObservableObject
         var evidence = new List<string>();
         if (!string.IsNullOrWhiteSpace(result.IdentityEvidence)) evidence.Add(result.IdentityEvidence!);
         foreach (var conflict in result.Conflicts) evidence.Add("⚠ " + conflict);
+
+        // 一批图里混了别人的截图时说清"这次只记了哪几张"，否则"2 张截图"
+        // 会让人以为另一个人那张的数据也写进了这条记录。
+        if (result.ExcludedScreens.Count > 0)
+        {
+            var kept = result.ScreenResults.Count(s => s.Included);
+            evidence.Add(
+                $"本次只合并了 {kept}/{result.ScreenResults.Count} 张截图；被排除的截图请单独导入");
+        }
+        else if (result.BatchIdentity == BatchIdentity.Unidentified)
+        {
+            evidence.Add("这批截图没有任何身份字段，保存前请确认归属");
+        }
         if (result.Candidates.Count > 0 && string.IsNullOrEmpty(result.CharacterId))
             evidence.Add($"证据不足，有 {result.Candidates.Count} 个候选（见下方身份关联）");
         EvidenceText = string.Join(Environment.NewLine, evidence);

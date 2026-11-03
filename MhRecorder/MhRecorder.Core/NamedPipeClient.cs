@@ -225,6 +225,15 @@ public sealed class NamedPipeClient : IDisposable
     public Task<JsonElement?> SaveRecognitionAsync(RecognitionResult result, IEnumerable<string> screens, CancellationToken ct = default) =>
         CallAsync(Methods.RecognizeSave, new { Result = result, Screens = screens }, ct);
 
+    public Task<PendingPayload?> ListPendingAsync(int limit = 50, CancellationToken ct = default) =>
+        CallAsync<PendingPayload>(Methods.PendingList, new { Limit = limit }, ct);
+
+    public Task<JsonElement?> AssignPendingAsync(string id, string characterId, CancellationToken ct = default) =>
+        CallAsync(Methods.PendingAssign, new { Id = id, CharacterId = characterId }, ct);
+
+    public Task DiscardPendingAsync(string id, CancellationToken ct = default) =>
+        CallAsync(Methods.PendingDiscard, new { Id = id }, ct);
+
     public Task<CharactersPayload?> ListCharactersAsync(CancellationToken ct = default) =>
         CallAsync<CharactersPayload>(Methods.CharactersList, new { }, ct);
 

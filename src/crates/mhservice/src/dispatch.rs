@@ -101,6 +101,18 @@ fn store_err(e: impl std::fmt::Display) -> DispatchError {
     DispatchError::new(errcode::STORAGE, e.to_string())
 }
 
+/// 存储层的错误分两类：一类是"存不进去"，另一类是"不告诉你该存给谁"。
+///
+/// 后者（[`mhstore::StoreError::Identity`]）不是故障，是设计：身份不唯一时宁可不存，
+/// 也不能挑一行最近更新的塞进去。前端要把这条文案原样显示给用户。
+fn save_err(e: mhstore::StoreError) -> DispatchError {
+    match e {
+        mhstore::StoreError::Identity(msg) => DispatchError::new(errcode::IDENTITY_AMBIGUOUS, msg),
+        mhstore::StoreError::NotFound(what) => DispatchError::new(errcode::NOT_FOUND, what),
+        other => DispatchError::new(errcode::STORAGE, other.to_string()),
+    }
+}
+
 fn dispatch_inner(
     state: &Arc<AppState>,
     req: &Request,
@@ -151,6 +163,15 @@ fn dispatch_inner(
             let cancelled = state.tasks.cancel(&id);
             Ok(json!({ "cancelled": cancelled, "id": id }))
         }
+        method::PENDING_LIST => pending_list(state, &req.params),
+        method::PENDING_ASSIGN => pending_assign(state, &req.params),
+        method::PENDING_DISCARD => {
+            let id = req_string(&req.params, "id")?;
+            state
+                .with_store(|s| s.discard_pending(&id))
+                .map_err(save_err)?;
+            Ok(json!({ "ok": true }))
+        }
         method::CHARACTERS_LIST => {
             let chars = state.with_store(|s| s.list_characters()).map_err(store_err)?;
             Ok(json!({ "characters": chars.iter().map(character_detail_json).collect::<Vec<_>>() }))
@@ -167,9 +188,16 @@ fn dispatch_inner(
             let nickname = opt_string(&req.params, "nickname");
             let game_id = opt_string(&req.params, "gameId");
             let level = req.params.get("level").and_then(Value::as_i64);
+            let server = opt_string(&req.params, "server");
             state
                 .with_store_mut(|s| {
-                    s.update_character_identity(&id, nickname.as_deref(), game_id.as_deref(), level)
+                    s.update_character_identity(
+                        &id,
+                        nickname.as_deref(),
+                        game_id.as_deref(),
+                        level,
+                        server.as_deref(),
+                    )
                 })
                 .map_err(store_err)?;
             Ok(json!({ "ok": true }))
@@ -508,10 +536,45 @@ fn recognize_save(state: &Arc<AppState>, params: &Value) -> DResult<Value> {
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
 
-    let id = state
+    let outcome = state
         .with_store_mut(|s| s.save_recognition(&result, &screens))
-        .map_err(store_err)?;
-    Ok(json!({ "characterId": id }))
+        .map_err(save_err)?;
+
+    Ok(match outcome {
+        mhstore::SaveOutcome::Saved { character_id, created } => json!({
+            "characterId": character_id,
+            "created": created,
+            "pending": false,
+        }),
+        // 没有身份信息：数据没丢，只是还没主人。前端据此提示"已存入待归属"。
+        mhstore::SaveOutcome::Pending { pending_id, reason } => json!({
+            "characterId": null,
+            "pendingId": pending_id,
+            "pending": true,
+            "message": reason,
+        }),
+    })
+}
+
+/// `pending.list`：没有身份信息、等着人工指定归属的识别结果。
+fn pending_list(state: &Arc<AppState>, params: &Value) -> DResult<Value> {
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+    let items = state.with_store(|s| s.list_pending(limit)).map_err(store_err)?;
+    let count = state.with_store(|s| s.pending_count()).unwrap_or(items.len() as i64);
+    Ok(json!({ "items": items, "count": count }))
+}
+
+/// `pending.assign`：把一条待归属记录归到指定角色。
+fn pending_assign(state: &Arc<AppState>, params: &Value) -> DResult<Value> {
+    let id = req_string(params, "id")?;
+    let character_id = req_string(params, "characterId")?;
+    let outcome = state
+        .with_store_mut(|s| s.assign_pending(&id, &character_id))
+        .map_err(save_err)?;
+    Ok(json!({
+        "characterId": outcome.character_id(),
+        "pending": outcome.character_id().is_none(),
+    }))
 }
 
 /// 任务：正在跑的和最近跑过的。

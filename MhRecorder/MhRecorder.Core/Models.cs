@@ -162,6 +162,88 @@ public sealed class RecognitionResult
     /// pixel space (panel cropping already folded back in).
     /// </summary>
     public List<FieldRegion> Regions { get; set; } = new();
+
+    /// <summary>
+    /// Every screenshot's own reading, one entry per submitted image.
+    ///
+    /// The top-level stats / currencies / inventory above are a *merged* view,
+    /// and merging only makes sense when the batch really is one character.
+    /// This keeps the per-image values, so "which screenshot did this gold come
+    /// from" always has an answer — including for the screens that were left
+    /// out of the merge.
+    /// </summary>
+    public List<ScreenResult> ScreenResults { get; set; } = new();
+
+    /// <summary>Whether every screenshot in the batch points at the same character.</summary>
+    public BatchIdentity BatchIdentity { get; set; }
+
+    /// <summary>Screens that were read but not merged (a different character).</summary>
+    [JsonIgnore]
+    public List<ScreenResult> ExcludedScreens =>
+        ScreenResults.Where(s => !s.Included).ToList();
+
+    [JsonIgnore]
+    public bool HasScreenConflict => BatchIdentity == BatchIdentity.Conflict;
+}
+
+/// <summary>Verdict on whether a batch of screenshots is one character.</summary>
+public enum BatchIdentity
+{
+    /// <summary>All screens agree (or carry no identity field but contradict nothing).</summary>
+    Consistent,
+
+    /// <summary>At least two screens point at different characters.</summary>
+    Conflict,
+
+    /// <summary>No screen carries any identity field: nobody knows whose this is.</summary>
+    Unidentified,
+}
+
+/// <summary>One screenshot's own recognition result.</summary>
+public sealed class ScreenResult
+{
+    public int ScreenIndex { get; set; }
+    public ScreenKind Screen { get; set; }
+
+    /// <summary>Identity fields read off *this* panel only.</summary>
+    public RecognizedCharacter Character { get; set; } = new();
+
+    public CombatStats Stats { get; set; } = new();
+    public Currencies Currencies { get; set; } = new();
+    public List<EquipmentItem> Equipment { get; set; } = new();
+    public List<InventoryItem> Inventory { get; set; } = new();
+    public double Confidence { get; set; }
+
+    /// <summary>Whether this screenshot's numbers went into the merged result.</summary>
+    public bool Included { get; set; }
+
+    /// <summary>Why it did not, e.g. "游戏ID … 与第 1 张的 … 不同".</summary>
+    public string? ExcludedReason { get; set; }
+
+    public List<FieldRegion> Regions { get; set; } = new();
+}
+
+/// <summary>
+/// A recognition that could not be attributed to anyone, kept until a human
+/// says whose it is. Saved instead of inventing a「未命名角色」row.
+/// </summary>
+public sealed class PendingRecognition
+{
+    public string Id { get; set; } = string.Empty;
+    public long CreatedAt { get; set; }
+    public string Reason { get; set; } = string.Empty;
+    public double Confidence { get; set; }
+    public string? Nickname { get; set; }
+    public string? GameId { get; set; }
+    public int ScreenshotCount { get; set; }
+    public List<string> Screens { get; set; } = new();
+    public bool HasCurrencies { get; set; }
+}
+
+public sealed class PendingPayload
+{
+    public List<PendingRecognition> Items { get; set; } = new();
+    public long Count { get; set; }
 }
 
 /// <summary>One box on a source screenshot that produced a recognised value.</summary>

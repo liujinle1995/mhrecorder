@@ -59,6 +59,18 @@ public sealed partial class SettingsViewModel : ObservableObject
     private string _statusText = string.Empty;
 
     /// <summary>
+    /// "3 条" / "无" —— 没有身份信息、等着人工指定归属的识别结果。
+    ///
+    /// 这些记录以前会直接变成「未命名角色」，混在角色列表里永远匹配不上；
+    /// 现在停在这里，等一句话就能归位。
+    /// </summary>
+    [ObservableProperty]
+    private string _pendingText = "—";
+
+    [ObservableProperty]
+    private bool _hasPending;
+
+    /// <summary>
     /// False when there is no backend: the page then shows the values as "—" and
     /// every control is disabled, instead of rendering defaults that look like
     /// real settings and then failing to save.
@@ -84,6 +96,8 @@ public sealed partial class SettingsViewModel : ObservableObject
             StatusText = "后端未连接：设置、导出与清空数据都不可用";
             DataDir = "—";
             ChangelogSummary = ChangelogSummaryOf();
+            PendingText = "—";
+            HasPending = false;
             _loading = false;
             return;
         }
@@ -111,6 +125,30 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         ChangelogSummary = ChangelogSummaryOf();
         await LoadEngineInfoAsync();
+        await LoadPendingAsync();
+    }
+
+    /// <summary>Count the parked results. Cheap enough to call after every save.</summary>
+    public async Task LoadPendingAsync()
+    {
+        if (!_backend.IsAvailable)
+        {
+            PendingText = "—";
+            HasPending = false;
+            return;
+        }
+
+        try
+        {
+            var items = await _backend.Api.ListPendingAsync();
+            HasPending = items.Count > 0;
+            PendingText = items.Count == 0 ? "无" : $"{items.Count} 条待归属";
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write($"SettingsViewModel.LoadPending failed: {ex}");
+            PendingText = "读取失败";
+        }
     }
 
     private static string ChangelogSummaryOf()

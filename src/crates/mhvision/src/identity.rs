@@ -544,3 +544,228 @@ pub(crate) fn resolve_identity(
 
     unresolved(IdentitySource::VisualMatch, 0.6, Vec::new())
 }
+
+// ---------------------------------------------------------------------------
+// 批次身份校验
+// ---------------------------------------------------------------------------
+
+/// 一张截图自己报出的身份字段 —— [`plan_batch`] 的唯一输入。
+///
+/// 只看"这张图上写着什么"，不看视觉证据：批次分组必须能从面板内容复核，
+/// 否则出了错没人能解释为什么这两张图被当成同一个人。
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenIdentity<'a> {
+    pub index: usize,
+    pub game_id: Option<&'a str>,
+    pub nickname: Option<&'a str>,
+}
+
+/// 一批截图该怎么合并。
+#[derive(Debug, Clone, Default)]
+pub struct BatchPlan {
+    /// 这一批的身份结论。
+    pub identity: BatchIdentity,
+    /// 身份当作"这一批是谁"的那张图的下标。
+    pub primary: usize,
+    /// 允许并进批次结果的图。
+    pub included: Vec<usize>,
+    /// 被排除的图及其原因：`(screen_index, 原因)`。
+    pub excluded: Vec<(usize, String)>,
+    /// 给用户看的说明。
+    pub notes: Vec<String>,
+}
+
+impl BatchPlan {
+    pub fn includes(&self, index: usize) -> bool {
+        self.included.contains(&index)
+    }
+
+    /// 把一张已并入的图排除掉（视觉复核发现它属于别人时用）。
+    pub fn exclude(&mut self, index: usize, reason: impl Into<String>) {
+        self.included.retain(|i| *i != index);
+        let reason = reason.into();
+        if !self.excluded.iter().any(|(i, _)| *i == index) {
+            self.excluded.push((index, reason.clone()));
+        }
+        self.identity = BatchIdentity::Conflict;
+        self.notes.push(format!("第 {} 张截图已排除：{reason}", index + 1));
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// 按某个键把截图分组，保留首次出现顺序。
+fn group_by<'a, F>(screens: &[ScreenIdentity<'a>], key: F) -> Vec<(&'a str, Vec<usize>)>
+where
+    F: Fn(&ScreenIdentity<'a>) -> Option<&'a str>,
+{
+    let mut groups: Vec<(&'a str, Vec<usize>)> = Vec::new();
+    for screen in screens {
+        let Some(value) = key(screen) else { continue };
+        match groups.iter_mut().find(|(existing, _)| *existing == value) {
+            Some((_, members)) => members.push(screen.index),
+            None => groups.push((value, vec![screen.index])),
+        }
+    }
+    groups
+}
+
+/// 组里成员最多的那个（并列取最早出现的）。
+fn largest<'a, 'b>(groups: &'b [(&'a str, Vec<usize>)]) -> Option<(&'a str, &'b [usize])> {
+    groups
+        .iter()
+        .max_by_key(|(_, members)| (members.len(), usize::MAX - members[0]))
+        .map(|(key, members)| (*key, members.as_slice()))
+}
+
+/// 决定一批截图能不能合并成一个角色。
+///
+/// 规则（对应产品要求，顺序即优先级）：
+/// 1. 两张图都有游戏ID 且不同 → 冲突，只合并主组；
+/// 2. 一张有ID、另一张没有 → 允许合并，后续由视觉复核（[`BatchPlan::exclude`]）；
+/// 3. 两张都有昵称且不同 → 冲突；
+/// 4. 完全没有身份字段 → 仍是"未知"，由用户确认归属，但不算冲突。
+///
+/// 冲突时不会丢数据：被排除的图照样进 `screen_results`，只是不参与合并。
+pub fn plan_batch(screens: &[ScreenIdentity<'_>]) -> BatchPlan {
+    let mut plan = BatchPlan {
+        identity: BatchIdentity::Consistent,
+        primary: screens.first().map(|s| s.index).unwrap_or(0),
+        included: screens.iter().map(|s| s.index).collect(),
+        excluded: Vec::new(),
+        notes: Vec::new(),
+    };
+    if screens.is_empty() {
+        return plan;
+    }
+
+    let by_id = group_by(screens, |s| non_empty(s.game_id));
+
+    match by_id.len() {
+        // 多个游戏ID：这一批里混了至少两个角色。
+        2.. => {
+            let (primary_id, members) = largest(&by_id).expect("non-empty");
+            plan.identity = BatchIdentity::Conflict;
+            plan.primary = members[0];
+            plan.included = members.to_vec();
+
+            for screen in screens {
+                if members.contains(&screen.index) {
+                    continue;
+                }
+                let reason = match non_empty(screen.game_id) {
+                    Some(other) => format!(
+                        "游戏ID {other} 与第 {} 张的 {primary_id} 不同",
+                        plan.primary + 1
+                    ),
+                    None => format!(
+                        "这张图没有游戏ID，无法判断它是否属于游戏ID {primary_id} 的角色"
+                    ),
+                };
+                plan.excluded.push((screen.index, reason));
+            }
+            plan.notes.push(format!(
+                "这批截图不是同一个角色：已只合并第 {} 张（游戏ID {primary_id}）那一组，其余 {} 张请单独导入",
+                plan.primary + 1,
+                plan.excluded.len()
+            ));
+        }
+        // 只有一个游戏ID：这个ID就是这一批的身份。
+        1 => {
+            let (game_id, members) = &by_id[0];
+            let game_id = game_id.to_string();
+            let members = members.clone();
+            plan.primary = members[0];
+            plan.included = members.clone();
+
+            // 主组的昵称，用来判"无ID的图是否明显是别人"。
+            let primary_nick = screens
+                .iter()
+                .filter(|s| members.contains(&s.index))
+                .find_map(|s| non_empty(s.nickname));
+
+            for screen in screens {
+                if members.contains(&screen.index) {
+                    continue;
+                }
+                match (non_empty(screen.nickname), primary_nick) {
+                    (Some(nick), Some(primary)) if nick != primary => {
+                        plan.identity = BatchIdentity::Conflict;
+                        plan.excluded.push((
+                            screen.index,
+                            format!("昵称「{nick}」与第 {} 张的「{primary}」不同", plan.primary + 1),
+                        ));
+                    }
+                    _ => plan.included.push(screen.index),
+                }
+            }
+
+            if plan.identity == BatchIdentity::Conflict {
+                plan.notes
+                    .push(format!("这批截图里有昵称不一致的图，已只合并游戏ID {game_id} 那一组"));
+            } else if plan.included.len() > members.len() {
+                let extras = plan
+                    .included
+                    .iter()
+                    .filter(|i| !members.contains(i))
+                    .map(|i| (i + 1).to_string())
+                    .collect::<Vec<_>>()
+                    .join("、");
+                plan.notes.push(format!(
+                    "第 {extras} 张没有游戏ID，已按同批次的游戏ID {game_id} 归到一起"
+                ));
+            }
+        }
+        // 一个游戏ID都没有：退回昵称。
+        _ => {
+            let by_nick = group_by(screens, |s| non_empty(s.nickname));
+            match by_nick.len() {
+                2.. => {
+                    let (primary_nick, members) = largest(&by_nick).expect("non-empty");
+                    plan.identity = BatchIdentity::Conflict;
+                    plan.primary = members[0];
+                    plan.included = members.to_vec();
+
+                    for screen in screens {
+                        if members.contains(&screen.index) {
+                            continue;
+                        }
+                        let reason = match non_empty(screen.nickname) {
+                            Some(other) => format!(
+                                "昵称「{other}」与第 {} 张的「{primary_nick}」不同",
+                                plan.primary + 1
+                            ),
+                            // 一张没有身份的图夹在两个不同昵称之间：谁都不是它。
+                            None => "这批截图出现了多个昵称，无法判断这张无身份信息的图属于谁"
+                                .to_string(),
+                        };
+                        plan.excluded.push((screen.index, reason));
+                    }
+                    plan.notes.push(format!(
+                        "这批截图出现了 {} 个不同昵称，已只合并「{primary_nick}」那一组",
+                        by_nick.len()
+                    ));
+                }
+                1 => {
+                    let (nickname, members) = &by_nick[0];
+                    plan.primary = members[0];
+                    plan.included = screens.iter().map(|s| s.index).collect();
+                    plan.notes.push(format!("整批按昵称「{nickname}」归到一起"));
+                }
+                // 什么身份字段都没有。
+                _ => {
+                    plan.identity = BatchIdentity::Unidentified;
+                    plan.primary = screens[0].index;
+                    plan.notes.push(
+                        "这批截图没有任何身份信息，已按同一角色处理；如果不是同一个人请分开导入"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    plan
+}

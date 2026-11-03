@@ -10,7 +10,7 @@ public static class ProtocolConstants
 {
     public const string PipeName = "mhrecorder.v1";
     public const int Version = 1;
-    public const string AppVersion = "0.13.0";
+    public const string AppVersion = "0.14.0";
 }
 
 /// <summary>Canonical method names (mirror of `protocol::method`).</summary>
@@ -42,6 +42,11 @@ public static class Methods
 
     /// <summary>Ask the backend to stop a running recognition at the next image.</summary>
     public const string TasksCancel = "tasks.cancel";
+
+    /// <summary>Recognitions without any identity, waiting for a human to assign them.</summary>
+    public const string PendingList = "pending.list";
+    public const string PendingAssign = "pending.assign";
+    public const string PendingDiscard = "pending.discard";
 }
 
 /// <summary>Error codes the client switch-cases on (mirror of `protocol::errcode`).</summary>
@@ -69,6 +74,12 @@ public static class ErrorCodes
 
     /// <summary>All backend connections are in use.</summary>
     public const string TooManyConnections = "tooManyConnections";
+
+    /// <summary>
+    /// Identity is not unique (two rows share the 游戏ID / nickname) or has no
+    /// evidence at all. Nothing was written — ask the user.
+    /// </summary>
+    public const string IdentityAmbiguous = "identityAmbiguous";
 }
 
 public sealed class WireRequest

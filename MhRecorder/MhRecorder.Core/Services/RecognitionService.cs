@@ -92,15 +92,36 @@ public sealed class RecognitionService
         && string.IsNullOrEmpty(result.Character.Nickname);
 
     /// <summary>Persist one recognition against the character it belongs to.</summary>
-    public async Task<string?> SaveAsync(
+    public async Task<SaveRecognitionOutcome> SaveAsync(
         RecognitionResult result, IReadOnlyList<string> screens, CancellationToken ct = default)
     {
-        var id = await _backend.Api.SaveRecognitionAsync(result, screens, ct).ConfigureAwait(false);
-        if (string.IsNullOrEmpty(id)) return null;
+        var outcome = await _backend.Api.SaveRecognitionAsync(result, screens, ct).ConfigureAwait(false);
+        if (!outcome.IsSaved) return outcome;
 
-        result.CharacterId = id;
+        result.CharacterId = outcome.CharacterId;
         await FillIdentityFromLibraryAsync(result, ct).ConfigureAwait(false);
-        return id;
+        return outcome;
+    }
+
+    /// <summary>
+    /// True when this result may be written at all. Nothing here is allowed to
+    /// invent an owner: a batch whose screens disagree is saved only for the
+    /// screens the pipeline merged, and an identity-less result goes to the
+    /// 待归属 list instead of becoming a「未命名角色」.
+    /// </summary>
+    public static bool CanSave(RecognitionResult result) =>
+        result.ScreenResults.Count == 0 || result.ScreenResults.Any(s => s.Included);
+
+    /// <summary>Names of the screenshots whose numbers actually went into the result.</summary>
+    public static IReadOnlyList<string> MergedScreenNames(
+        RecognitionResult result, IReadOnlyList<string> batch)
+    {
+        if (result.ScreenResults.Count == 0) return batch;
+        var names = result.ScreenResults
+            .Where(s => s.Included && s.ScreenIndex >= 0 && s.ScreenIndex < batch.Count)
+            .Select(s => batch[s.ScreenIndex])
+            .ToList();
+        return names.Count > 0 ? names : batch;
     }
 
     /// <summary>

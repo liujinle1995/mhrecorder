@@ -37,12 +37,29 @@ public sealed class RemoteAppService : IAppService
     public async Task<RecognitionResult?> RecognizeAsync(IReadOnlyList<RecognizeImage> images, CancellationToken ct = default) =>
         await _client.RecognizeAsync(images, ct).ConfigureAwait(false);
 
-    public async Task<string?> SaveRecognitionAsync(RecognitionResult result, IReadOnlyList<string> screens, CancellationToken ct = default)
+    public async Task<SaveRecognitionOutcome> SaveRecognitionAsync(RecognitionResult result, IReadOnlyList<string> screens, CancellationToken ct = default)
     {
         var payload = await _client.SaveRecognitionAsync(result, screens, ct).ConfigureAwait(false);
-        if (payload is null) return null;
-        return payload.Value.TryGetProperty("characterId", out var id) ? id.GetString() : null;
+        if (payload is not { } json) return new SaveRecognitionOutcome(null, false, null, "后端没有返回保存结果");
+
+        var characterId = json.TryGetProperty("characterId", out var id) ? id.GetString() : null;
+        var pending = json.TryGetProperty("pending", out var p) && p.ValueKind == JsonValueKind.True;
+        var pendingId = json.TryGetProperty("pendingId", out var pid) ? pid.GetString() : null;
+        var message = json.TryGetProperty("message", out var msg) ? msg.GetString() : null;
+        return new SaveRecognitionOutcome(characterId, pending, pendingId, message);
     }
+
+    public async Task<IReadOnlyList<PendingRecognition>> ListPendingAsync(CancellationToken ct = default)
+    {
+        var payload = await _client.ListPendingAsync(50, ct).ConfigureAwait(false);
+        return payload?.Items ?? new List<PendingRecognition>();
+    }
+
+    public async Task AssignPendingAsync(string id, string characterId, CancellationToken ct = default) =>
+        await _client.AssignPendingAsync(id, characterId, ct).ConfigureAwait(false);
+
+    public async Task DiscardPendingAsync(string id, CancellationToken ct = default) =>
+        await _client.DiscardPendingAsync(id, ct).ConfigureAwait(false);
 
     public async Task<IReadOnlyList<CharacterDetail>> ListCharactersAsync(CancellationToken ct = default)
     {

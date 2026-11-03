@@ -14,8 +14,8 @@ use crate::pipeline::*;
 use crate::thumbnail::*;
 use crate::types::*;
 use mhcore::{
-    Character, CombatStats, Currencies, EvidenceKind, IdentityRef, IdentitySource,
-    PanelFingerprint, ScreenKind,
+    Character, CombatStats, Currencies, EvidenceKind, IdentityRef,
+    IdentitySource, PanelFingerprint, RecognizedCharacter, ScreenKind,
 };
 
 use crate::*;
@@ -1068,4 +1068,200 @@ fn panel_like_image() -> image::RgbaImage {
         let v = ((x * 7 + y * 13) % 256) as u8;
         image::Rgba([v, v / 2, 255 - v, 255])
     })
+}
+
+// ---------------------------------------------------------------------------
+// 逐图识别 + 批次身份校验
+// ---------------------------------------------------------------------------
+//
+// 这一组测试盯的是同一件事：一批截图里混进另一个角色时，数据不能串。
+// 旧实现把所有图的 OCR 行拼成一个池子再统一提取身份，池子里两个角色的
+// 游戏ID 谁先被扫到就用谁 —— 于是"甲的人物属性 + 乙的包裹"变成"甲的金币"。
+
+fn craft_scan(
+    index: usize,
+    screen: ScreenKind,
+    game_id: Option<&str>,
+    nickname: Option<&str>,
+) -> ScreenScan {
+    ScreenScan {
+        index,
+        screen,
+        character: RecognizedCharacter {
+            game_id: game_id.map(str::to_string),
+            nickname: nickname.map(str::to_string),
+            ..Default::default()
+        },
+        stats: CombatStats::default(),
+        currencies: Currencies::default(),
+        equipment: Vec::new(),
+        inventory: Vec::new(),
+        confidence: 0.95,
+        fingerprints: Vec::new(),
+        avatar_png: None,
+        avatar_thumb: None,
+        appearance: None,
+        regions: Vec::new(),
+    }
+}
+
+fn plan_of(scans: &[ScreenScan]) -> BatchPlan {
+    let identities: Vec<ScreenIdentity<'_>> = scans
+        .iter()
+        .map(|s| ScreenIdentity {
+            index: s.index,
+            game_id: s.character.game_id.as_deref(),
+            nickname: s.character.nickname.as_deref(),
+        })
+        .collect();
+    plan_batch(&identities)
+}
+
+/// 两张图各自写着不同的游戏ID：不能合并，而且第二张的金币绝不能进第一张。
+#[test]
+fn a_batch_with_two_game_ids_is_never_merged_into_one_character() {
+    let mut attrs = craft_scan(0, ScreenKind::CharacterAttributes, Some("429277361"), Some("莫莫莫"));
+    attrs.stats.hp = Some(mhcore::AttributeValue::new(5604, 0.99, "5604/5604"));
+
+    let mut bag = craft_scan(1, ScreenKind::Inventory, Some("429277013"), Some("海淘淘"));
+    bag.currencies.gold = Some(mhcore::AttributeValue::new(2_000_000, 0.99, "2,000,000"));
+    bag.inventory.push(mhcore::InventoryItem {
+        name: "还魂丹".into(),
+        count: 3,
+        column: None,
+        row: None,
+        confidence: 0.9,
+    });
+
+    let scans = vec![attrs, bag];
+    let plan = plan_of(&scans);
+    assert_eq!(plan.identity, mhcore::BatchIdentity::Conflict);
+    assert_eq!(plan.primary, 0);
+    assert!(plan.includes(0));
+    assert!(!plan.includes(1));
+
+    let (result, _) = merge_included(&scans, &plan, 2, &[]);
+
+    assert_eq!(result.batch_identity, mhcore::BatchIdentity::Conflict);
+    assert_eq!(result.character.game_id.as_deref(), Some("429277361"));
+    assert_eq!(result.stats.hp.as_ref().map(|v| v.value), Some(5604));
+    assert!(result.currencies.gold.is_none(), "乙的金币不能算进甲");
+    assert!(result.inventory.is_empty(), "乙的物品不能算进甲");
+    assert!(result.regions.is_empty(), "被排除的图的框不该画在甲的截图上");
+
+    // 数据没丢：第二张的读数留在它自己的条目里，并写明为什么被排除。
+    let second = result
+        .screen_results
+        .iter()
+        .find(|s| s.screen_index == 1)
+        .expect("second screen kept");
+    assert!(!second.included);
+    assert_eq!(second.currencies.gold.as_ref().unwrap().value, 2_000_000);
+    assert_eq!(second.inventory.len(), 1);
+    let reason = second.excluded_reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("429277013"), "{reason}");
+    assert!(
+        result.conflicts.iter().any(|c| c.contains("第 2 张")),
+        "{:?}",
+        result.conflicts
+    );
+}
+
+/// 一张有 ID、一张没有（包裹）：允许合并，这是最常见的一次录入两张图。
+#[test]
+fn a_screenshot_without_identity_joins_the_batch() {
+    let attrs = craft_scan(0, ScreenKind::CharacterAttributes, Some("429277361"), Some("莫莫莫"));
+    let mut bag = craft_scan(1, ScreenKind::Inventory, None, None);
+    bag.currencies.gold = Some(mhcore::AttributeValue::new(2_625_812, 0.99, "2,625,812"));
+
+    let scans = vec![attrs, bag];
+    let plan = plan_of(&scans);
+    assert_eq!(plan.identity, mhcore::BatchIdentity::Consistent);
+    assert!(plan.includes(1));
+
+    let (result, _) = merge_included(&scans, &plan, 2, &[]);
+    assert_eq!(result.currencies.gold.as_ref().map(|v| v.value), Some(2_625_812));
+    assert_eq!(result.screen_results.len(), 2, "每张图都留了独立读数");
+    assert!(result.screen_results.iter().all(|s| s.included));
+    // 身份仍以写着 ID 的那张为准。
+    assert_eq!(result.character.nickname.as_deref(), Some("莫莫莫"));
+}
+
+/// 两张都只有昵称，且不一样：不能直接合并。
+#[test]
+fn two_different_nicknames_without_ids_conflict() {
+    let a = craft_scan(0, ScreenKind::CharacterAttributes, None, Some("莫莫莫"));
+    let b = craft_scan(1, ScreenKind::CharacterAttributes, None, Some("海淘淘"));
+
+    let scans = vec![a, b];
+    let plan = plan_of(&scans);
+    assert_eq!(plan.identity, mhcore::BatchIdentity::Conflict);
+    assert!(plan.includes(0));
+    assert!(!plan.includes(1));
+
+    let (result, _) = merge_included(&scans, &plan, 2, &[]);
+    assert_eq!(result.character.nickname.as_deref(), Some("莫莫莫"));
+    assert!(result
+        .screen_results
+        .iter()
+        .find(|s| s.screen_index == 1)
+        .and_then(|s| s.excluded_reason.clone())
+        .unwrap_or_default()
+        .contains("海淘淘"));
+}
+
+/// 一张有 ID，另一张有别的昵称但没有 ID：也是两个人。
+#[test]
+fn a_different_nickname_beside_a_game_id_conflicts() {
+    let a = craft_scan(0, ScreenKind::CharacterAttributes, Some("429277361"), Some("莫莫莫"));
+    let b = craft_scan(1, ScreenKind::Unknown, None, Some("海淘淘"));
+
+    let plan = plan_of(&[a, b]);
+    assert_eq!(plan.identity, mhcore::BatchIdentity::Conflict);
+    assert!(!plan.includes(1));
+}
+
+/// 整批都没有身份字段：不是冲突，但也不能假装知道是谁。
+#[test]
+fn a_batch_with_no_identity_at_all_is_marked_unidentified() {
+    let a = craft_scan(0, ScreenKind::Inventory, None, None);
+    let b = craft_scan(1, ScreenKind::Inventory, None, None);
+
+    let plan = plan_of(&[a, b]);
+    assert_eq!(plan.identity, mhcore::BatchIdentity::Unidentified);
+    assert!(plan.included.len() == 2, "没有证据否定，就按同一角色处理");
+    assert!(plan.notes.iter().any(|n| n.contains("没有任何身份信息")));
+}
+
+/// 单张图没有身份字段也标成未知：界面要提示"请确认归属"。
+#[test]
+fn a_single_identityless_screenshot_is_unidentified() {
+    let plan = plan_of(&[craft_scan(0, ScreenKind::Inventory, None, None)]);
+    assert_eq!(plan.identity, mhcore::BatchIdentity::Unidentified);
+}
+
+/// 逐图取身份：包裹那张不能从别人的面板里"蹭"到游戏ID。
+#[test]
+fn each_panel_only_reports_its_own_identity() {
+    let attrs = merge_adjacent_fragments(&[
+        OcrLine { text: "莫莫莫89级".into(), confidence: 0.99, rect: (399, 167, 98, 14) },
+        OcrLine { text: "ID".into(), confidence: 0.9, rect: (397, 194, 15, 13) },
+        OcrLine { text: "429277361".into(), confidence: 0.99, rect: (412, 194, 84, 13) },
+        OcrLine { text: "5604/5604".into(), confidence: 0.99, rect: (791, 173, 71, 13) },
+    ]);
+    let bag = merge_adjacent_fragments(&[
+        OcrLine { text: "金币 2,000,000".into(), confidence: 0.95, rect: (70, 728, 300, 30) },
+    ]);
+
+    let stats = extract_stats(&attrs);
+    let from_attrs = screen_identity(&attrs, &stats);
+    let from_bag = screen_identity(&bag, &CombatStats::default());
+
+    assert_eq!(from_attrs.game_id.as_deref(), Some("429277361"));
+    assert_eq!(from_attrs.nickname.as_deref(), Some("莫莫莫"));
+    assert_eq!(from_attrs.level, Some(89));
+
+    assert!(from_bag.game_id.is_none());
+    assert!(from_bag.nickname.is_none());
+    assert!(from_bag.level.is_none());
 }

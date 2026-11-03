@@ -370,6 +370,73 @@ pub struct RecognitionResult {
     /// folded back in), which is what the review workspace draws on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<FieldRegion>,
+    /// 每张截图自己读到的东西，一张一项。
+    ///
+    /// 顶层的 `stats` / `currencies` / `inventory` 是**合并后**的视图，而合并
+    /// 是有前提的：那一批图必须属于同一个角色。这个字段保留每张图的原样读数，
+    /// 所以"这笔金币是哪张图读出来的"永远能回答，冲突被排除的图也不会丢数据。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screen_results: Vec<ScreenResult>,
+    /// 这批截图是否都指向同一个角色。`Conflict` 时顶层只包含能确认的那一组。
+    #[serde(default)]
+    pub batch_identity: BatchIdentity,
+}
+
+/// 一次批量识别的身份结论。
+///
+/// 没有这个字段之前，流水线把所有图的 OCR 行拼成一个池子再统一提取身份，
+/// 于是"甲的人物属性 + 乙的包裹"会安静地变成"甲的金币"。现在先逐图取身份，
+/// 再判断这一批到底是不是同一个人。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum BatchIdentity {
+    /// 所有截图都指向同一个角色（或没有身份字段但不矛盾）。
+    #[default]
+    Consistent,
+    /// 至少两张截图指向不同角色。顶层只合并了能确认的那一组，
+    /// `screen_results` 里排除了的图带着原因。
+    Conflict,
+    /// 整批都没有任何身份字段：可能还是同一个人，但没有任何证据。
+    Unidentified,
+}
+
+impl BatchIdentity {
+    /// 是否允许把这批数据当成一个角色的记录保存。
+    pub fn is_mergeable(self) -> bool {
+        matches!(self, BatchIdentity::Consistent | BatchIdentity::Unidentified)
+    }
+}
+
+/// 单张截图的识别结果。
+///
+/// 逐图保留而不是只留合并值，是为了两个具体的失败场景：
+/// 1. 一批图里混进了另一个角色的截图 —— 要知道是哪一张、它读到了什么；
+/// 2. 合并规则出错 —— 能拿单图结果对账，而不是只有一份可疑的汇总。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenResult {
+    /// Index inside the recognised batch (matches `FieldRegion::screen_index`).
+    pub screen_index: usize,
+    pub screen: ScreenKind,
+    /// Identity fields read off *this* panel only.
+    pub character: RecognizedCharacter,
+    #[serde(default)]
+    pub stats: CombatStats,
+    #[serde(default)]
+    pub currencies: Currencies,
+    #[serde(default)]
+    pub equipment: Vec<EquipmentItem>,
+    #[serde(default)]
+    pub inventory: Vec<InventoryItem>,
+    pub confidence: f64,
+    /// 这张图的读数是否进了批次结果。
+    pub included: bool,
+    /// 没进批次结果的原因，例如"游戏ID 429277361 与第 1 张的 429277013 不同"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_reason: Option<String>,
+    /// 这张图自己的审核框。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<FieldRegion>,
 }
 
 /// One box on a source screenshot that produced a recognised value.
@@ -433,6 +500,8 @@ impl RecognitionResult {
             candidates: Vec::new(),
             conflicts: Vec::new(),
             regions: Vec::new(),
+            screen_results: Vec::new(),
+            batch_identity: BatchIdentity::Consistent,
         }
     }
 }

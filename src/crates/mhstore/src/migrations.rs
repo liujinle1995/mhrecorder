@@ -58,6 +58,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/005_recognition_tasks.sql"),
         fixup: None,
     },
+    Migration {
+        version: 6,
+        name: "pending_recognitions",
+        sql: include_str!("../migrations/006_pending_recognitions.sql"),
+        fixup: None,
+    },
 ];
 
 /// 代码认识的最新版本。
@@ -143,6 +149,7 @@ fn verify(conn: &Connection) -> Result<()> {
         ("character_appearance", &["character_id", "hair_rgb"]),
         ("items", &["name", "last_seen_at"]),
         ("recognition_tasks", &["id", "method", "state", "started_at"]),
+        ("pending_recognitions", &["id", "created_at", "reason", "payload"]),
     ];
 
     for (table, columns) in REQUIRED {

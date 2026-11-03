@@ -73,10 +73,10 @@ OpenCV 4.12 world 已 vendor，ONNX Runtime 1.31.1 已 vendor（`ort` 用 `load-
 | `ping` | `{}` | `{"status":"ready","version":"0.9.2","protocol":1}` |
 | `version` | `{}` | `{"backend":"0.9.2","protocol":1,"models":"ppocrv4"}` |
 | `recognize` | `{"images":[{"name":"a.png","data":"<base64>"}]}` | `RecognitionResult` |
-| `recognize.save` | `{"result":RecognitionResult,"screens":["a.png"]}` | `{"characterId":"..."}` |
+| `recognize.save` | `{"result":RecognitionResult,"screens":["a.png"]}` | `{"characterId":"…","pending":false}` 或 `{"characterId":null,"pending":true,"pendingId":"…","message":"…"}` |
 | `characters.list` | `{}` | `{"characters":[CharacterDetail...]}` |
 | `characters.get` | `{"id":"..."}` | `CharacterDetail` |
-| `characters.update` | `{"id":"...","nickname":"?","gameId":"?","level":?}` | `{"ok":true}` |
+| `characters.update` | `{"id":"...","nickname":"?","gameId":"?","level":?,"server":"?"}` | `{"ok":true}` |
 | `characters.confirm` | `{"id":"...","confidence":0.96}` | `{"ok":true}` |
 | `characters.delete` | `{"id":"..."}` | `{"ok":true}` |
 | `statistics.get` | `{"recentLimit":5}` | `{"summary":AssetSummary,"characters":[CharacterAssetBar...],"recent":[AssetPoint...]}` |
@@ -86,6 +86,11 @@ OpenCV 4.12 world 已 vendor，ONNX Runtime 1.31.1 已 vendor（`ort` 用 `load-
 | `export.csv` | `{"path":"..."}` | `{"path":"...","bytes":123}` |
 | `export.zip` | `{"path":"..."}` | `{"path":"...","bytes":123}` |
 | `data.clear` | `{}` | `{"ok":true}` |
+| `pending.list` | `{"limit":50}` | `{"items":[PendingRecognition...],"count":3}` |
+| `pending.assign` | `{"id":"…","characterId":"…"}` | `{"characterId":"…","pending":false}` |
+| `pending.discard` | `{"id":"…"}` | `{"ok":true}` |
+| `tasks.list` | `{"limit":20}` | `{"running":[…],"history":[…]}` |
+| `tasks.cancel` | `{"id":"…"}` | `{"cancelled":true,"id":"…"}` |
 
 `CharacterDetail` 形如 `{"character":Character,"snapshotCount":3,"lastRecordedAt":123456}`。
 所有 JSON 字段均为 camelCase，与 `mhcore` 的 serde 配置一致。
@@ -158,6 +163,54 @@ MhRecorder.App/                  只做"画"和"把平台能力接进来"
 |---|---|---|
 | `MH_FORCE_DEMO=1` | 忽略命名管道，强制用内存演示后端 | **仅调试构建** |
 | `MH_DEMO_IMAGE=<png>` | 演示模式下把这张截图垫在识别结果下面，便于调审核界面 | 仅调试构建 |
+
+## 逐图结果与批次校验
+
+`RecognitionResult` 的顶层 `stats` / `currencies` / `inventory` 是**合并视图**，
+前提是这一批截图确实属于同一个角色。为了不让这个前提变成假设：
+
+```rust
+// mhvision::pipeline —— 顺序不能反
+for img in images { scans.push(read_one(img)) }        // 每张图独立提取身份与数值
+let mut plan = plan_batch(&identities);                // 纯函数，可单测
+verify_unsigned_screens(&mut plan, &scans, refs, known); // 无ID的图再走一次视觉复核
+let (result, _) = merge_included(&scans, &plan, …);     // 只合并 included
+```
+
+`ScreenResult`（`mhcore`）逐图保留：
+
+| 字段 | 含义 |
+|---|---|
+| `screenIndex` / `screen` | 第几张图、哪类面板 |
+| `character` | **只从这张图**读到的昵称/游戏ID/等级/门派/服务器 |
+| `stats` / `currencies` / `equipment` / `inventory` | 这张图自己的读数 |
+| `regions` | 这张图自己的审核框 |
+| `included` / `excludedReason` | 是否并进了批次结果；没并进的原因 |
+
+`batchIdentity` 有 `consistent` / `conflict` / `unidentified` 三种。冲突时前端在
+证据区写明"本次只合并了 1/2 张截图"，并把被排除的图上的框从叠加层里去掉——
+那些数字不属于这条记录。
+
+## 身份安全：两道闸门
+
+1. **识别层**：`plan_batch` 按面板写着的身份分组；无ID的图允许并入主组，但若库里
+   的视觉证据明确指向**另一个**角色（游戏ID 不同），照样排除。
+2. **存储层**（`mhstore::characters::resolve_target`）：`recognize.save` 是后端接口，
+   不能依赖前端先问过用户。显式 id → 游戏ID 唯一 → 昵称唯一 → 否则拒绝或进待归属。
+
+| 输入 | 结果 |
+|---|---|
+| 显式 `characterId` 存在 | 写入该行 |
+| 显式 `characterId` 不存在 | `notFound`，**不新建** |
+| 游戏ID 唯一 | 写入 |
+| 游戏ID 多条 | `identityAmbiguous`，拒绝 |
+| 昵称唯一 | 写入（`identity_confirmed` 仍为 0） |
+| 昵称多条 | `identityAmbiguous`，拒绝 |
+| 无任何身份 | 写 `pending_recognitions`，返回 `pending:true` |
+
+`pending_recognitions` 存完整 `RecognitionResult`，`pending.assign` 时设
+`character_id` 后**重放**一次 `save_recognition`：快照、指纹、外观、物品字典都走
+同一条路径，不会因为"是补归属"而少记东西。归属成功才删行，失败留着可以重试。
 
 ## 识别审核工作区
 

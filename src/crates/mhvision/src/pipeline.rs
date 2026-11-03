@@ -2,8 +2,13 @@
 //!
 //! 把解码、定位、分类、OCR、字段提取、身份关联串成一次调用，并在每张图
 //! 之间检查取消 / 超时。
+//!
+//! 顺序是这套逻辑的关键：**先逐图读完，再决定能不能合并**。旧做法把所有图的
+//! OCR 行拼成一个池子、最后统一提取身份，于是「甲的人物属性 + 乙的包裹」会
+//! 安静地变成「甲的金币」——池子里同时存在两个角色的身份字段，谁先被扫到就
+//! 用谁。现在每张图只认它自己的面板内容，合并前先由
+//! [`identity::plan_batch`] 判断这一批到底是不是同一个人。
 
-use crate::prelude::*;
 use crate::analysis::ImageAnalysis;
 use crate::appearance::{appearance_signature, crop_rgba};
 use crate::classify::{classify_from_lines, classify_screen, locate_panel};
@@ -14,32 +19,76 @@ use crate::extract::{
 };
 use crate::features::{extract_features, ImageFeatures};
 use crate::identity::{
-    associate_by_evidence, decide_identity, resolve_identity, IdentityDecision, MatchPolicy,
+    associate_by_evidence, decide_identity, plan_batch, resolve_identity, BatchPlan,
+    IdentityDecision, MatchPolicy, ScreenIdentity,
 };
 use crate::ocr::OcrEngine;
-use crate::regions::{
-    build_regions, currency_specs, push_box_region, stat_specs, RegionSpec,
-};
+use crate::prelude::*;
+use crate::regions::{build_regions, currency_specs, push_box_region, stat_specs, RegionSpec};
 use crate::thumbnail::panel_thumb;
+
 // ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
 
+/// A batch's product: the merged result plus the cache ledger.
+///
+/// The ledger goes back to the caller (`mhservice`): the pipeline holds no
+/// storage. Whether to write cache entries, and how many to keep, is a
+/// service-layer decision.
+pub struct BatchOutcome {
+    pub result: RecognitionResult,
+    /// Indices of the images whose analysis came from `cache`.
+    pub cached_screens: Vec<usize>,
+    /// Analysis computed this run, to be written back by the caller.
+    pub computed: Vec<(usize, ImageAnalysis)>,
+}
+
+/// One screenshot, read on its own.
+///
+/// This is the intermediate the merge step consumes. Keeping it per-image is
+/// what stops one capture's identity leaking into another's numbers.
+pub(crate) struct ScreenScan {
+    pub(crate) index: usize,
+    pub(crate) screen: ScreenKind,
+    pub(crate) character: RecognizedCharacter,
+    pub(crate) stats: CombatStats,
+    pub(crate) currencies: Currencies,
+    pub(crate) equipment: Vec<EquipmentItem>,
+    pub(crate) inventory: Vec<InventoryItem>,
+    pub(crate) confidence: f64,
+    pub(crate) fingerprints: Vec<PanelFingerprint>,
+    pub(crate) avatar_png: Option<String>,
+    pub(crate) avatar_thumb: Option<String>,
+    pub(crate) appearance: Option<AppearanceSignature>,
+    pub(crate) regions: Vec<FieldRegion>,
+}
+
+impl ScreenScan {
+    /// A screen we could not read at all. Still occupies its index so the
+    /// per-screen list lines up with the submitted images.
+    pub(crate) fn unreadable(index: usize, screen: ScreenKind) -> Self {
+        Self {
+            index,
+            screen,
+            character: RecognizedCharacter::default(),
+            stats: CombatStats::default(),
+            currencies: Currencies::default(),
+            equipment: Vec::new(),
+            inventory: Vec::new(),
+            confidence: 0.0,
+            fingerprints: Vec::new(),
+            avatar_png: None,
+            avatar_thumb: None,
+            appearance: None,
+            regions: Vec::new(),
+        }
+    }
+}
+
 /// High-level pipeline: decode -> classify -> OCR -> field extraction.
 pub struct RecognitionPipeline {
     engine: OcrEngine,
-}
-
-/// 一次批量识别的产物：结果 + 缓存账本。
-///
-/// 账本交给调用方（`mhservice`）去落库：流水线不持有存储，缓存是否写入、
-/// 写多少条上限，都属于"服务层怎么用这份结果"的问题。
-pub struct BatchOutcome {
-    pub result: RecognitionResult,
-    /// 真正用了缓存的图下标（对应传入的 `cache`）。
-    pub cached_screens: Vec<usize>,
-    /// 本次算出来的分析，需要调用方写回缓存。
-    pub computed: Vec<(usize, ImageAnalysis)>,
 }
 
 impl RecognitionPipeline {
@@ -91,17 +140,12 @@ impl RecognitionPipeline {
             return Err(VisionError::Ocr("empty batch".into()));
         }
 
-        let mut result = RecognitionResult::new(IdentitySource::VisualMatch);
-        result.screenshot_count = images.len();
-
         let mut cached_screens: Vec<usize> = Vec::new();
         let mut computed: Vec<(usize, ImageAnalysis)> = Vec::new();
+        let mut scans: Vec<ScreenScan> = Vec::with_capacity(images.len());
+        let mut warnings: Vec<String> = Vec::new();
 
-        let mut all_lines: Vec<OcrLine> = Vec::new();
-        let mut stats_merged = CombatStats::default();
-        let mut currency_merged = Currencies::default();
-        let mut confidences: Vec<f64> = Vec::new();
-
+        // ---- 第一步：每张图独立读完，谁的信息都不混 ----
         for (screen_index, img) in images.iter().enumerate() {
             // 每张图之间是最自然的检查点：单张 OCR 一两秒，取消延迟最多一张。
             if control.cancelled() {
@@ -146,14 +190,14 @@ impl RecognitionPipeline {
                         l
                     }
                     Err(e) => {
-                        result.screens.push(classify_screen(work));
-                        result.warnings.push(format!("OCR 失败：{e}"));
+                        warnings.push(format!("第 {} 张截图 OCR 失败：{e}", screen_index + 1));
+                        scans.push(ScreenScan::unreadable(screen_index, classify_screen(work)));
                         continue;
                     }
                 }
             };
             if lines.is_empty() {
-                result.warnings.push("未在截图中识别到文字".to_string());
+                warnings.push(format!("第 {} 张截图没有识别到文字", screen_index + 1));
             }
 
             // The real game panels render labels with wide letter spacing and
@@ -165,198 +209,93 @@ impl RecognitionPipeline {
             // was tuned on panel-only images and called a perfectly readable
             // window capture `Unknown`, which the UI then reported as failure.
             let kind = classify_from_lines(&lines).unwrap_or_else(|| classify_screen(work));
-            result.screens.push(kind);
-
-            // Fingerprint the panel itself. A 包裹 screenshot carries no
-            // 游戏ID and no nickname, so this thumbnail (plus the 人物评分 when
-            // the bag shows one) is the only way a later capture can be linked
-            // back to its character.
-            {
-                use base64::Engine as _;
-                let score = extract_character_score(&lines);
-                result.fingerprints.push(PanelFingerprint {
-                    screen: kind,
-                    thumb: base64::engine::general_purpose::STANDARD
-                        .encode(panel_thumb(work)),
-                    score,
-                });
-            }
-
-            // Crop the framed portrait once, from the panel that carries an
-            // identity header. This is the avatar the UI shows instead of an
-            // initial-letter placeholder.
-            if result.avatar_png_base64.is_none() {
-                if let Some(png) = crop_avatar_png(work, &lines) {
-                    result.avatar_png_base64 = Some(png);
-                }
-            }
-            // A 16x16 grayscale of the same portrait: the UI shows the PNG, the
-            // matcher compares the thumb. Colour is discarded so a change of
-            // dye or lighting does not make the same face score differently.
-            if result.avatar_thumb.is_none() {
-                result.avatar_thumb = crop_avatar_thumb(work, &lines);
-            }
-
-            // 发色 / 武器 of the character on this panel. Recorded once per
-            // batch — every screenshot in a batch is the same character, and a
-            // later capture whose items changed is linked by this instead of by
-            // the panel thumbnail.
-            if result.appearance.is_none() {
-                result.appearance = appearance_signature(work, kind);
-            }
 
             // Classification only labels the screenshot for the UI. Every
             // extractor runs on every screenshot because field presence is a
             // far more reliable discriminator than a layout guess: a 背包
             // capture can still expose 金币/银币, and a 人物属性 capture may
-            // list equipment. Merging by field keeps both paths correct.
+            // list equipment.
             let stats = extract_stats(&lines);
-            merge_stats(&mut stats_merged, &stats);
             let currencies = extract_currencies(&lines);
-            merge_currencies(&mut currency_merged, &currencies);
             let equipment = extract_equipment(&lines);
-            if !equipment.is_empty() {
-                for e in equipment {
-                    if let Some(existing) =
-                        result.equipment.iter_mut().find(|x| x.slot == e.slot && x.name == e.name)
-                    {
-                        existing.confidence = existing.confidence.max(e.confidence);
-                    } else {
-                        result.equipment.push(e);
-                    }
-                }
-            }
             // Inventory pairing is per-screenshot: names and counts only make
             // sense relative to each other within one capture. It also needs a
             // 包裹-class panel to be present — on a 人物属性 frame every short
             // CJK run next to a number looks like "item + stack count", which is
             // how a quest tracker became an inventory item.
-            let items = if looks_like_bag(&lines) {
+            let inventory = if looks_like_bag(&lines) {
                 extract_inventory(&lines)
             } else {
                 Vec::new()
             };
-            for item in &items {
-                if let Some(existing) =
-                    result.inventory.iter_mut().find(|x| x.name == item.name)
-                {
-                    existing.count += item.count;
-                } else {
-                    result.inventory.push(item.clone());
-                }
-            }
 
-            // ---- 审核框：每个值到底读的是截图上哪一块 ----
-            // 这一步只回填坐标，不参与识别结论；查不到框的字段会被跳过，所以
-            // 它不会让一次成功的识别失败。
-            {
-                let mut specs = stat_specs(&stats);
-                specs.extend(currency_specs(&currencies));
+            // 身份字段只从这张图自己的 OCR 行里取 —— 这是整套修复的核心。
+            let character = screen_identity(&lines, &stats);
 
-                let game_id_here = extract_game_id(&lines);
-                if let Some((gid, _)) = &game_id_here {
-                    specs.push(RegionSpec::from_line(
-                        "game_id",
-                        "游戏ID",
-                        gid.clone(),
-                        None,
-                        FieldRegion::KIND_IDENTITY,
-                    ));
+            // Fingerprint the panel itself. A 包裹 screenshot carries no
+            // 游戏ID and no nickname, so this thumbnail (plus the 人物评分 when
+            // the bag shows one) is the only way a later capture can be linked
+            // back to its character.
+            let fingerprint = {
+                use base64::Engine as _;
+                PanelFingerprint {
+                    screen: kind,
+                    thumb: base64::engine::general_purpose::STANDARD.encode(panel_thumb(work)),
+                    score: extract_character_score(&lines),
                 }
-                if let Some((level, _)) = extract_level(&lines) {
-                    specs.push(RegionSpec::from_line(
-                        "level",
-                        "等级",
-                        level.to_string(),
-                        Some(level),
-                        FieldRegion::KIND_IDENTITY,
-                    ));
-                }
-                if let Some(nickname) = extract_nickname(
-                    &lines,
-                    &stats,
-                    game_id_here.as_ref().map(|(gid, _)| gid.as_str()),
-                ) {
-                    specs.push(RegionSpec::from_line(
-                        "nickname",
-                        "昵称",
-                        nickname,
-                        None,
-                        FieldRegion::KIND_IDENTITY,
-                    ));
-                }
-                for item in &items {
-                    specs.push(RegionSpec::from_line(
-                        format!("item:{}", item.name),
-                        "物品",
-                        item.name.clone(),
-                        Some(item.count),
-                        FieldRegion::KIND_ITEM,
-                    ));
-                }
+            };
 
-                result.regions.extend(build_regions(&lines, screen_index, kind, offset, &specs));
+            let regions = screen_regions(ScreenRegions {
+                lines: &lines,
+                work,
+                screen_index,
+                kind,
+                offset,
+                stats: &stats,
+                currencies: &currencies,
+                character: &character,
+                inventory: &inventory,
+            });
 
-                // 头像不是 OCR 读出来的，但审核时要能看见"匹配时看的是这张脸"。
-                if let Some((ax, ay, size)) =
-                    avatar_geometry(&lines, work.width() as i32, work.height() as i32)
-                {
-                    push_box_region(
-                        &mut result.regions,
-                        screen_index,
-                        kind,
-                        offset,
-                        "feature:avatar",
-                        "头像",
-                        FieldRegion::KIND_FEATURE,
-                        ax,
-                        ay,
-                        size,
-                        size,
-                    );
-                }
-            }
-
-            for l in &lines {
-                confidences.push(l.confidence);
-            }
-            all_lines.extend(lines);
+            scans.push(ScreenScan {
+                index: screen_index,
+                screen: kind,
+                // A 16x16 grayscale of the portrait: the UI shows the PNG, the
+                // matcher compares the thumb. Colour is discarded so a change
+                // of dye or lighting does not make the same face score lower.
+                avatar_thumb: crop_avatar_thumb(work, &lines),
+                avatar_png: crop_avatar_png(work, &lines),
+                // 发色 / 武器 of the character on this panel.
+                appearance: appearance_signature(work, kind),
+                stats,
+                currencies,
+                equipment,
+                inventory,
+                character,
+                confidence: mean_confidence(&lines),
+                fingerprints: vec![fingerprint],
+                regions,
+            });
         }
 
-        result.stats = stats_merged;
-        result.currencies = currency_merged;
+        // ---- 第二步：这一批到底是不是同一个人 ----
+        let identities: Vec<ScreenIdentity<'_>> = scans
+            .iter()
+            .map(|s| ScreenIdentity {
+                index: s.index,
+                game_id: s.character.game_id.as_deref(),
+                nickname: s.character.nickname.as_deref(),
+            })
+            .collect();
+        let mut plan = plan_batch(&identities);
 
-        for line in &all_lines {
-            if let Some((gid, conf)) = extract_game_id(&[line.clone()].as_slice()) {
-                result.character.game_id = Some(gid);
-                confidences.push(conf);
-                break;
-            }
-        }
-        if result.character.game_id.is_none() {
-            if let Some((gid, conf)) = extract_game_id(&all_lines) {
-                result.character.game_id = Some(gid);
-                confidences.push(conf);
-            }
-        }
-        if let Some((lvl, conf)) = extract_level(&all_lines) {
-            result.character.level = Some(lvl);
-            confidences.push(conf);
-        }
-        result.character.school = extract_school(&all_lines);
-        // Only trust a nickname when the panel actually carries an identity
-        // header. A bare 包裹 capture has no name at all, so guessing one from
-        // stray panel chrome would invent a character.
-        if result.character.game_id.is_some()
-            || all_lines.iter().any(|l| l.text.contains("级") || l.text.contains("Lv"))
-        {
-            result.character.nickname = extract_nickname(
-                &all_lines,
-                &result.stats,
-                result.character.game_id.as_deref(),
-            );
-        }
+        // 没有游戏ID的图，若视觉证据明确指向另一个角色，同样要排除。
+        verify_unsigned_screens(&mut plan, &scans, refs, known);
 
+        // ---- 第三步：只合并确认属于同一角色的那些图 ----
+        let (mut result, mut confidences) = merge_included(&scans, &plan, images.len(), &warnings);
+
+        // ---- 第四步：这一批是谁 ----
         let resolution = resolve_identity(
             result.character.game_id.as_deref(),
             result.character.nickname.as_deref(),
@@ -464,6 +403,295 @@ impl RecognitionPipeline {
     }
 }
 
+/// 把允许合并的图并成批次结果，被排除的图只留在 `screen_results` 里。
+///
+/// 单独成函数是为了能被测试直接调用：这段逻辑以前混在循环里，没法在不跑 OCR
+/// 的情况下证明"乙的包裹不会被算进甲的金币"。
+pub(crate) fn merge_included(
+    scans: &[ScreenScan],
+    plan: &BatchPlan,
+    image_count: usize,
+    warnings: &[String],
+) -> (RecognitionResult, Vec<f64>) {
+    let mut result = RecognitionResult::new(IdentitySource::VisualMatch);
+    result.screenshot_count = image_count;
+    result.screens = scans.iter().map(|s| s.screen).collect();
+    result.batch_identity = plan.identity;
+    result.warnings.extend(warnings.iter().cloned());
+    result.warnings.extend(plan.notes.iter().cloned());
+    for (index, reason) in &plan.excluded {
+        result
+            .conflicts
+            .push(format!("第 {} 张截图不属于这批角色：{reason}", index + 1));
+    }
+
+    let mut stats_merged = CombatStats::default();
+    let mut currency_merged = Currencies::default();
+    let mut confidences: Vec<f64> = Vec::new();
+
+    for scan in scans {
+        let included = plan.includes(scan.index);
+        result.screen_results.push(ScreenResult {
+            screen_index: scan.index,
+            screen: scan.screen,
+            character: scan.character.clone(),
+            stats: scan.stats.clone(),
+            currencies: scan.currencies.clone(),
+            equipment: scan.equipment.clone(),
+            inventory: scan.inventory.clone(),
+            confidence: scan.confidence,
+            included,
+            excluded_reason: plan
+                .excluded
+                .iter()
+                .find(|(i, _)| *i == scan.index)
+                .map(|(_, reason)| reason.clone()),
+            regions: scan.regions.clone(),
+        });
+
+        if !included {
+            continue;
+        }
+
+        merge_stats(&mut stats_merged, &scan.stats);
+        merge_currencies(&mut currency_merged, &scan.currencies);
+
+        for item in &scan.equipment {
+            if let Some(existing) =
+                result.equipment.iter_mut().find(|x| x.slot == item.slot && x.name == item.name)
+            {
+                existing.confidence = existing.confidence.max(item.confidence);
+            } else {
+                result.equipment.push(item.clone());
+            }
+        }
+        for item in &scan.inventory {
+            if let Some(existing) = result.inventory.iter_mut().find(|x| x.name == item.name) {
+                existing.count += item.count;
+            } else {
+                result.inventory.push(item.clone());
+            }
+        }
+
+        // 审核框只画进批次结果的那几张图：被排除的图上的数字不属于这条记录。
+        result.regions.extend(scan.regions.iter().cloned());
+        result.fingerprints.extend(scan.fingerprints.iter().cloned());
+
+        if result.avatar_png_base64.is_none() {
+            result.avatar_png_base64 = scan.avatar_png.clone();
+        }
+        if result.avatar_thumb.is_none() {
+            result.avatar_thumb = scan.avatar_thumb.clone();
+        }
+        if result.appearance.is_none() {
+            result.appearance = scan.appearance.clone();
+        }
+
+        merge_identity(&mut result.character, &scan.character);
+        confidences.push(scan.confidence);
+    }
+
+    result.stats = stats_merged;
+    result.currencies = currency_merged;
+
+    (result, confidences)
+}
+
+/// 这张图自己写着"我是谁" —— 只看这一张图的 OCR 行。
+pub(crate) fn screen_identity(lines: &[OcrLine], stats: &CombatStats) -> RecognizedCharacter {
+    let game_id = extract_game_id(lines).map(|(gid, _)| gid);
+    RecognizedCharacter {
+        // Only trust a nickname when the panel actually carries an identity
+        // header. A bare 包裹 capture has no name at all, so guessing one from
+        // stray panel chrome would invent a character.
+        nickname: if game_id.is_some()
+            || lines.iter().any(|l| l.text.contains("级") || l.text.contains("Lv"))
+        {
+            extract_nickname(lines, stats, game_id.as_deref())
+        } else {
+            None
+        },
+        game_id,
+        level: extract_level(lines).map(|(lvl, _)| lvl),
+        school: extract_school(lines),
+        // 服务器不在面板上单独成行，目前无从读取；留给手工更正。
+        server: None,
+    }
+}
+
+/// 合并同一角色的多张图的身份字段：先到先得，后来的只补空。
+pub(crate) fn merge_identity(dst: &mut RecognizedCharacter, src: &RecognizedCharacter) {
+    if dst.game_id.is_none() {
+        dst.game_id = src.game_id.clone();
+    }
+    if dst.nickname.is_none() {
+        dst.nickname = src.nickname.clone();
+    }
+    if dst.level.is_none() {
+        dst.level = src.level;
+    }
+    if dst.school.is_none() {
+        dst.school = src.school.clone();
+    }
+    if dst.server.is_none() {
+        dst.server = src.server.clone();
+    }
+}
+
+fn mean_confidence(lines: &[OcrLine]) -> f64 {
+    if lines.is_empty() {
+        return 0.0;
+    }
+    let mean = lines.iter().map(|l| l.confidence).sum::<f64>() / lines.len() as f64;
+    mean.clamp(0.0, 1.0)
+}
+
+/// 视觉复核没有游戏ID的图。
+///
+/// 一张包裹截图不写身份，正常情况下它就是同一批里那个人拍的。但"没有身份"
+/// 不等于"属于这一批"：如果这张图的版式、评分或外观明确落在库里另一个角色上，
+/// 那它就是别人的包裹，不能并进来。证据不足时保持并入——第一次录入时库里
+/// 本来就没有可比的参照物，强求验证会让正常流程失败。
+fn verify_unsigned_screens(
+    plan: &mut BatchPlan,
+    scans: &[ScreenScan],
+    refs: &[IdentityRef],
+    known: &[Character],
+) {
+    if refs.is_empty() {
+        return;
+    }
+    let Some(primary_gid) = scans
+        .iter()
+        .filter(|s| plan.includes(s.index))
+        .find_map(|s| s.character.game_id.clone())
+    else {
+        return;
+    };
+
+    let mut to_exclude: Vec<(usize, String)> = Vec::new();
+    for scan in scans.iter().filter(|s| plan.includes(s.index)) {
+        if scan.character.game_id.is_some() || scan.fingerprints.is_empty() {
+            continue;
+        }
+        let assoc = associate_by_evidence(
+            &scan.fingerprints,
+            refs,
+            scan.appearance.as_ref(),
+            scan.avatar_thumb.as_deref(),
+            now_ms(),
+            &MatchPolicy::default(),
+        );
+        let Some(id) = assoc.character_id.as_deref() else { continue };
+        let Some(owner) = known.iter().find(|c| c.id == id) else { continue };
+        if let Some(gid) = owner.game_id.as_deref() {
+            if gid != primary_gid {
+                to_exclude.push((
+                    scan.index,
+                    format!(
+                        "视觉匹配指向「{}」（游戏ID {gid}），与这一批的 {primary_gid} 不同",
+                        owner.nickname
+                    ),
+                ));
+            }
+        }
+    }
+
+    for (index, reason) in to_exclude {
+        plan.exclude(index, reason);
+    }
+}
+
+/// 审核框的输入，参数一多就不适合平铺成位置参数了。
+struct ScreenRegions<'a> {
+    lines: &'a [OcrLine],
+    work: &'a image::RgbaImage,
+    screen_index: usize,
+    kind: ScreenKind,
+    offset: (i32, i32),
+    stats: &'a CombatStats,
+    currencies: &'a Currencies,
+    character: &'a RecognizedCharacter,
+    inventory: &'a [InventoryItem],
+}
+
+/// ---- 审核框：每个值到底读的是截图上哪一块 ----
+///
+/// 这一步只回填坐标，不参与识别结论；查不到框的字段会被跳过，所以它不会让
+/// 一次成功的识别失败。
+fn screen_regions(input: ScreenRegions<'_>) -> Vec<FieldRegion> {
+    let mut specs = stat_specs(input.stats);
+    specs.extend(currency_specs(input.currencies));
+
+    if let Some(gid) = input.character.game_id.as_deref() {
+        specs.push(RegionSpec::from_line(
+            "game_id",
+            "游戏ID",
+            gid,
+            None,
+            FieldRegion::KIND_IDENTITY,
+        ));
+    }
+    if let Some(level) = input.character.level {
+        specs.push(RegionSpec::from_line(
+            "level",
+            "等级",
+            level.to_string(),
+            Some(level),
+            FieldRegion::KIND_IDENTITY,
+        ));
+    }
+    if let Some(nickname) = input.character.nickname.as_deref() {
+        specs.push(RegionSpec::from_line(
+            "nickname",
+            "昵称",
+            nickname,
+            None,
+            FieldRegion::KIND_IDENTITY,
+        ));
+    }
+    for item in input.inventory {
+        specs.push(RegionSpec::from_line(
+            format!("item:{}", item.name),
+            "物品",
+            item.name.clone(),
+            Some(item.count),
+            FieldRegion::KIND_ITEM,
+        ));
+    }
+
+    let mut regions = build_regions(
+        input.lines,
+        input.screen_index,
+        input.kind,
+        input.offset,
+        &specs,
+    );
+
+    // 头像不是 OCR 读出来的，但审核时要能看见"匹配时看的是这张脸"。
+    if let Some((ax, ay, size)) = avatar_geometry(
+        input.lines,
+        input.work.width() as i32,
+        input.work.height() as i32,
+    ) {
+        push_box_region(
+            &mut regions,
+            input.screen_index,
+            input.kind,
+            input.offset,
+            "feature:avatar",
+            "头像",
+            FieldRegion::KIND_FEATURE,
+            ax,
+            ay,
+            size,
+            size,
+        );
+    }
+
+    regions
+}
+
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -482,7 +710,8 @@ pub(crate) fn evidence_summary(evidence: &[MatchEvidence]) -> String {
         .join("；")
 }
 
-pub(crate) fn merge_stats(dst: &mut CombatStats, src: &CombatStats) {    macro_rules! take {
+pub(crate) fn merge_stats(dst: &mut CombatStats, src: &CombatStats) {
+    macro_rules! take {
         ($field:ident) => {
             if dst.$field.is_none() {
                 dst.$field = src.$field.clone();
@@ -507,4 +736,3 @@ pub(crate) fn merge_currencies(dst: &mut Currencies, src: &Currencies) {
         dst.silver = src.silver.clone();
     }
 }
-

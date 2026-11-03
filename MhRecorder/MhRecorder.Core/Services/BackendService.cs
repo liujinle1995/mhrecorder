@@ -192,8 +192,17 @@ public sealed class UnavailableAppService : IAppService
     public Task<RecognitionResult?> RecognizeAsync(IReadOnlyList<RecognizeImage> images, CancellationToken ct = default)
         => Task.FromException<RecognitionResult?>(Fail());
 
-    public Task<string?> SaveRecognitionAsync(RecognitionResult result, IReadOnlyList<string> screens, CancellationToken ct = default)
-        => Task.FromException<string?>(Fail());
+    public Task<SaveRecognitionOutcome> SaveRecognitionAsync(RecognitionResult result, IReadOnlyList<string> screens, CancellationToken ct = default)
+        => Task.FromException<SaveRecognitionOutcome>(Fail());
+
+    public Task<IReadOnlyList<PendingRecognition>> ListPendingAsync(CancellationToken ct = default)
+        => Task.FromException<IReadOnlyList<PendingRecognition>>(Fail());
+
+    public Task AssignPendingAsync(string id, string characterId, CancellationToken ct = default)
+        => Task.FromException(Fail());
+
+    public Task DiscardPendingAsync(string id, CancellationToken ct = default)
+        => Task.FromException(Fail());
 
     public Task<IReadOnlyList<CharacterDetail>> ListCharactersAsync(CancellationToken ct = default)
         => Task.FromException<IReadOnlyList<CharacterDetail>>(Fail());

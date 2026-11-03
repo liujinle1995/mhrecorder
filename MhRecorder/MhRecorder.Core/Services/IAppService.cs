@@ -19,7 +19,22 @@ public interface IAppService
 
     Task<RecognitionResult?> RecognizeAsync(IReadOnlyList<RecognizeImage> images, CancellationToken ct = default);
 
-    Task<string?> SaveRecognitionAsync(RecognitionResult result, IReadOnlyList<string> screens, CancellationToken ct = default);
+    /// <summary>
+    /// Persist a (possibly user-corrected) recognition.
+    ///
+    /// The backend is the last line of defence for identity: when nothing says
+    /// whose capture this is, it parks the result instead of guessing a row.
+    /// Callers must check <see cref="SaveRecognitionOutcome.IsPending"/> rather
+    /// than assuming an id came back.
+    /// </summary>
+    Task<SaveRecognitionOutcome> SaveRecognitionAsync(RecognitionResult result, IReadOnlyList<string> screens, CancellationToken ct = default);
+
+    /// <summary>Recognitions parked because nobody (not even the matcher) knew whose they were.</summary>
+    Task<IReadOnlyList<PendingRecognition>> ListPendingAsync(CancellationToken ct = default);
+
+    Task AssignPendingAsync(string id, string characterId, CancellationToken ct = default);
+
+    Task DiscardPendingAsync(string id, CancellationToken ct = default);
 
     Task<IReadOnlyList<CharacterDetail>> ListCharactersAsync(CancellationToken ct = default);
 
@@ -55,6 +70,24 @@ public interface IAppService
     /// Returns null when the backend is unreachable.
     /// </summary>
     Task<JsonElement?> GetEngineInfoAsync(CancellationToken ct = default);
+}
+
+/// <summary>Where a save landed.</summary>
+/// <param name="CharacterId">The row it was written to; null when pending.</param>
+/// <param name="IsPending">
+/// True when the result had no identity at all. Not an error: the data is kept,
+/// it just has no owner yet.
+/// </param>
+/// <param name="PendingId">Id of the parked record, for the 待归属 list.</param>
+/// <param name="Message">Human explanation from the backend, when pending.</param>
+public sealed record SaveRecognitionOutcome(
+    string? CharacterId,
+    bool IsPending,
+    string? PendingId,
+    string? Message)
+{
+    /// <summary>True when something was actually written to a character row.</summary>
+    public bool IsSaved => !string.IsNullOrEmpty(CharacterId);
 }
 
 public enum ExportFormat

@@ -13,6 +13,9 @@ public sealed class FakeAppService : IAppService
 {
     private readonly object _lock = new();
 
+    /// <summary>Parked recognitions; empty in the demo backend unless a test seeds one.</summary>
+    private readonly List<PendingRecognition> _pending = new();
+
     private List<FakeCharacter> _characters;
     private Settings _settings = new()
     {
@@ -144,7 +147,7 @@ public sealed class FakeAppService : IAppService
     private static AttributeValue Attr(long value, double confidence, string raw) =>
         new() { Value = value, Confidence = confidence, RawText = raw };
 
-    public Task<string?> SaveRecognitionAsync(RecognitionResult result, IReadOnlyList<string> screens, CancellationToken ct = default)
+    public Task<SaveRecognitionOutcome> SaveRecognitionAsync(RecognitionResult result, IReadOnlyList<string> screens, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
 
@@ -181,7 +184,36 @@ public sealed class FakeAppService : IAppService
             id = existing.Id;
         }
 
-        return Task.FromResult<string?>(id);
+        return Task.FromResult(new SaveRecognitionOutcome(id, false, null, null));
+    }
+
+    public Task<IReadOnlyList<PendingRecognition>> ListPendingAsync(CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        lock (_lock)
+        {
+            return Task.FromResult<IReadOnlyList<PendingRecognition>>(_pending.ToList());
+        }
+    }
+
+    public Task AssignPendingAsync(string id, string characterId, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        lock (_lock)
+        {
+            _pending.RemoveAll(p => p.Id == id);
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task DiscardPendingAsync(string id, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        lock (_lock)
+        {
+            _pending.RemoveAll(p => p.Id == id);
+        }
+        return Task.CompletedTask;
     }
 
     // ------------------------------------------------------------------

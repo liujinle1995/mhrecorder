@@ -94,6 +94,30 @@
                         </Grid>
                     </Border>
 
+                    <!-- 待归属：识别出来但没有任何身份信息的记录。以前它们会变成
+                         「未命名角色」，现在停在这里等一句话。 -->
+                    <Border Style="{StaticResource SettingsRowBorder}" MinHeight="58">
+                        <Grid>
+                            <StackPanel Orientation="Horizontal" Spacing="10"
+                                        HorizontalAlignment="Left" VerticalAlignment="Center">
+                                <TextBlock Text="待归属的识别结果"
+                                           Style="{StaticResource SettingsLabelText}"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Text="{x:Bind ViewModel.PendingText, Mode=OneWay}"
+                                           FontSize="12"
+                                           VerticalAlignment="Center"
+                                           Foreground="{StaticResource TextTertiaryBrush}" />
+                            </StackPanel>
+                            <Button Content="处理…"
+                                    Style="{StaticResource GhostButtonStyle}"
+                                    Padding="12,5"
+                                    HorizontalAlignment="Right" VerticalAlignment="Center"
+                                    AutomationProperties.AutomationId="ManagePendingButton"
+                                    IsEnabled="{x:Bind ViewModel.HasPending, Mode=OneWay}"
+                                    Click="OnManagePendingClick" />
+                        </Grid>
+                    </Border>
+
                     <Border Style="{StaticResource SettingsRowBorder}" MinHeight="58">
                         <Grid>
                             <TextBlock Text="导出全部数据为 JSON" Style="{StaticResource SettingsLabelText}"

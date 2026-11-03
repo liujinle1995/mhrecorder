@@ -30,6 +30,24 @@ public sealed partial class SettingsPage : Page
     }
 
     /// <summary>
+    /// 待归属记录：识别出来了但不知道是谁的截图。放在设置里而不是主流程上，
+    /// 因为它是补救入口，不是日常路径。
+    /// </summary>
+    private async void OnManagePendingClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (XamlRoot is null) return;
+            await new PendingDialog(AppHost.Backend.Api) { XamlRoot = XamlRoot }.ShowAsync();
+            await ViewModel.LoadPendingAsync();
+        }
+        catch (Exception ex)
+        {
+            App.Log($"OnManagePendingClick failed: {ex}");
+        }
+    }
+
+    /// <summary>
     /// Release notes are a dialog, not an inline card: four releases of history
     /// made the page scroll through a wall of text nobody re-reads.
     /// </summary>

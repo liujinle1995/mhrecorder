@@ -100,6 +100,10 @@ pub mod method {
     pub const TASKS_LIST: &str = "tasks.list";
     /// 请求取消一个任务；识别会在下一张图之前停下。
     pub const TASKS_CANCEL: &str = "tasks.cancel";
+    /// 没有任何身份信息、等着人工指定归属的识别结果。
+    pub const PENDING_LIST: &str = "pending.list";
+    pub const PENDING_ASSIGN: &str = "pending.assign";
+    pub const PENDING_DISCARD: &str = "pending.discard";
 }
 
 /// Error codes the client switch-cases on.
@@ -121,6 +125,8 @@ pub mod errcode {
     pub const TOO_LARGE: &str = "tooLarge";
     /// 连接数已满。
     pub const TOO_MANY_CONNECTIONS: &str = "tooManyConnections";
+    /// 身份不唯一 / 无证据：拒绝自动归属，需要人来决定。
+    pub const IDENTITY_AMBIGUOUS: &str = "identityAmbiguous";
 }
 
 #[cfg(test)]

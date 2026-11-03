@@ -18,6 +18,16 @@ fn temp_store() -> (Store, PathBuf) {
     (Store::open(&path).unwrap(), dir)
 }
 
+/// 保存并拿到角色 id —— 绝大多数用例关心的是"存进了哪一行"。
+fn save(store: &mut Store, result: &RecognitionResult, screens: &[String]) -> String {
+    match store.save_recognition(result, screens).unwrap() {
+        SaveOutcome::Saved { character_id, .. } => character_id,
+        SaveOutcome::Pending { pending_id, reason } => {
+            panic!("意外进了待归属（{pending_id}）：{reason}")
+        }
+    }
+}
+
 fn sample_result(nickname: &str, game_id: &str, gold: i64, silver: i64) -> RecognitionResult {
     let mut r = RecognitionResult::new(IdentitySource::IdField);
     r.character.nickname = Some(nickname.to_string());
@@ -44,7 +54,7 @@ fn bag_save_keeps_nickname_and_stats() {
     let (mut store, _dir) = temp_store();
 
     let attrs = sample_result("莫莫莫", "429277361", 0, 0);
-    let id = store.save_recognition(&attrs, &["a.png".into()]).unwrap();
+    let id = save(&mut store, &attrs, &["a.png".into()]);
 
     let mut bag = RecognitionResult::new(IdentitySource::VisualMatch);
     bag.character_id = Some(id.clone());
@@ -54,7 +64,7 @@ fn bag_save_keeps_nickname_and_stats() {
         thumb: "AAAA".into(),
         score: Some(20214),
     });
-    store.save_recognition(&bag, &["b.png".into()]).unwrap();
+    save(&mut store, &bag, &["b.png".into()]);
 
     let chars = store.list_characters().unwrap();
     assert_eq!(chars.len(), 1, "a linked bag must not create a second row");
@@ -86,7 +96,7 @@ fn open_twice_is_idempotent() {
 fn save_recognition_creates_character_and_snapshot() {
     let (mut store, _dir) = temp_store();
     let r = sample_result("海淘淘", "429277013", 2_942_685, 14_297_169);
-    let id = store.save_recognition(&r, &["a.png".into()]).unwrap();
+    let id = save(&mut store, &r, &["a.png".into()]);
 
     let chars = store.list_characters().unwrap();
     assert_eq!(chars.len(), 1);
@@ -103,12 +113,8 @@ fn save_recognition_creates_character_and_snapshot() {
 #[test]
 fn saving_same_game_id_updates_instead_of_inserting() {
     let (mut store, _dir) = temp_store();
-    let id1 = store
-        .save_recognition(&sample_result("海淘淘", "429277013", 100, 200), &[])
-        .unwrap();
-    let id2 = store
-        .save_recognition(&sample_result("海淘淘", "429277013", 300, 400), &[])
-        .unwrap();
+    let id1 = save(&mut store, &sample_result("海淘淘", "429277013", 100, 200), &[]);
+    let id2 = save(&mut store, &sample_result("海淘淘", "429277013", 300, 400), &[]);
 
     assert_eq!(id1, id2, "same game id must resolve to the same character row");
     let chars = store.list_characters().unwrap();
@@ -159,7 +165,7 @@ fn seed_snapshot(
 #[test]
 fn daily_totals_do_not_zero_a_field_missing_from_the_last_capture() {
     let (mut store, _dir) = temp_store();
-    let id = store.save_recognition(&sample_result("海淘淘", "1", 0, 0), &[]).unwrap();
+    let id = save(&mut store, &sample_result("海淘淘", "1", 0, 0), &[]);
     store.conn.lock().unwrap().execute("DELETE FROM snapshots", []).unwrap();
 
     seed_snapshot(&store, &id, "2026-10-01T10:00:00Z", Some(2_600_000), Some(100));
@@ -177,7 +183,7 @@ fn daily_totals_do_not_zero_a_field_missing_from_the_last_capture() {
 #[test]
 fn daily_totals_merge_fields_independently() {
     let (mut store, _dir) = temp_store();
-    let id = store.save_recognition(&sample_result("海淘淘", "1", 0, 0), &[]).unwrap();
+    let id = save(&mut store, &sample_result("海淘淘", "1", 0, 0), &[]);
     store.conn.lock().unwrap().execute("DELETE FROM snapshots", []).unwrap();
 
     seed_snapshot(&store, &id, "2026-10-01T09:00:00Z", Some(1000), None);
@@ -193,7 +199,7 @@ fn daily_totals_merge_fields_independently() {
 #[test]
 fn a_field_never_captured_stays_unknown() {
     let (mut store, _dir) = temp_store();
-    let id = store.save_recognition(&sample_result("海淘淘", "1", 0, 0), &[]).unwrap();
+    let id = save(&mut store, &sample_result("海淘淘", "1", 0, 0), &[]);
     store.conn.lock().unwrap().execute("DELETE FROM snapshots", []).unwrap();
 
     seed_snapshot(&store, &id, "2026-10-01T10:00:00Z", None, Some(50));
@@ -207,9 +213,9 @@ fn a_field_never_captured_stays_unknown() {
 #[test]
 fn statistics_computes_percent_change() {
     let (mut store, _dir) = temp_store();
-    let id = store.save_recognition(&sample_result("海淘淘", "1", 1000, 2000), &[]).unwrap();
+    let id = save(&mut store, &sample_result("海淘淘", "1", 1000, 2000), &[]);
     let second = sample_result("海淘淘", "1", 1100, 2000);
-    store.save_recognition(&second, &[]).unwrap();
+    save(&mut store, &second, &[]);
 
     let stats = store.statistics(5).unwrap();
     assert_eq!(stats.summary.character_count, 1);
@@ -226,7 +232,7 @@ fn statistics_computes_percent_change() {
 #[test]
 fn identity_candidates_match_game_id_and_nickname() {
     let (mut store, _dir) = temp_store();
-    store.save_recognition(&sample_result("海淘淘", "429277013", 1, 1), &[]).unwrap();
+    save(&mut store, &sample_result("海淘淘", "429277013", 1, 1), &[]);
 
     let by_id = store.find_identity_candidates(Some("429277013"), None).unwrap();
     assert_eq!(by_id.len(), 1);
@@ -245,8 +251,10 @@ fn identity_candidates_match_game_id_and_nickname() {
 #[test]
 fn update_identity_marks_confirmed() {
     let (mut store, _dir) = temp_store();
-    let id = store.save_recognition(&sample_result("海淘淘", "1", 1, 1), &[]).unwrap();
-    store.update_character_identity(&id, Some("海涛涛"), Some("429277013"), Some(90)).unwrap();
+    let id = save(&mut store, &sample_result("海淘淘", "1", 1, 1), &[]);
+    store
+        .update_character_identity(&id, Some("海涛涛"), Some("429277013"), Some(90), Some("紫禁之巅"))
+        .unwrap();
 
     let d = store.get_character(&id).unwrap();
     assert_eq!(d.character.nickname, "海涛涛");
@@ -258,7 +266,7 @@ fn update_identity_marks_confirmed() {
 #[test]
 fn delete_character_cascades_snapshots() {
     let (mut store, _dir) = temp_store();
-    let id = store.save_recognition(&sample_result("海淘淘", "1", 1, 1), &[]).unwrap();
+    let id = save(&mut store, &sample_result("海淘淘", "1", 1, 1), &[]);
     store.delete_character(&id).unwrap();
     assert!(store.get_character(&id).is_err());
     assert!(store.list_snapshots(&id, 10).unwrap().is_empty());
@@ -267,7 +275,7 @@ fn delete_character_cascades_snapshots() {
 #[test]
 fn clear_all_keeps_settings() {
     let (mut store, _dir) = temp_store();
-    store.save_recognition(&sample_result("海淘淘", "1", 1, 1), &[]).unwrap();
+    save(&mut store, &sample_result("海淘淘", "1", 1, 1), &[]);
     let mut settings = store.load_settings().unwrap();
     settings.auto_navigate_after_save = true;
     store.save_settings(&settings).unwrap();
@@ -307,7 +315,7 @@ fn export_document_carries_the_identity_material() {
         row: None,
         confidence: 0.8,
     });
-    store.save_recognition(&r, &[]).unwrap();
+    save(&mut store, &r, &[]);
 
     let doc = store.export_document().unwrap();
     assert_eq!(doc["characters"].as_array().unwrap().len(), 1);
@@ -337,9 +345,9 @@ fn items_dictionary_counts_distinct_characters() {
         row: None,
         confidence: 0.9,
     });
-    store.save_recognition(&a, &[]).unwrap();
+    save(&mut store, &a, &[]);
     // 同一个角色再拍一次：计数不该涨到 2。
-    store.save_recognition(&a, &[]).unwrap();
+    save(&mut store, &a, &[]);
 
     let items = store.list_items(10).unwrap();
     assert_eq!(items.len(), 1);
@@ -353,7 +361,7 @@ fn items_dictionary_counts_distinct_characters() {
         row: None,
         confidence: 0.9,
     });
-    store.save_recognition(&b, &[]).unwrap();
+    save(&mut store, &b, &[]);
     let items = store.list_items(10).unwrap();
     assert_eq!(items[0]["characterCount"], 2, "{:?}", items[0]);
 }
@@ -361,7 +369,7 @@ fn items_dictionary_counts_distinct_characters() {
 #[test]
 fn backup_zip_contains_data_and_database() {
     let (mut store, dir) = temp_store();
-    store.save_recognition(&sample_result("海淘淘", "1", 5, 6), &[]).unwrap();
+    save(&mut store, &sample_result("海淘淘", "1", 5, 6), &[]);
 
     let dest = dir.join("backup.zip");
     let summary = store.export_backup(&dest, true).unwrap();
@@ -395,7 +403,7 @@ fn backup_zip_contains_data_and_database() {
 #[test]
 fn backup_without_database_still_writes_data_json() {
     let (mut store, dir) = temp_store();
-    store.save_recognition(&sample_result("海淘淘", "1", 1, 1), &[]).unwrap();
+    save(&mut store, &sample_result("海淘淘", "1", 1, 1), &[]);
     let summary = store.export_backup(&dir.join("light.zip"), false).unwrap();
     assert!(!summary.includes_database);
     assert!(!summary.entries.contains(&"mhrecorder.db".to_string()));
@@ -478,4 +486,219 @@ fn settings_defaults_are_sane() {
     let s = store.load_settings().unwrap();
     assert!(s.editable_before_save, "default matches the design's ON toggle");
     assert!(!s.auto_navigate_after_save);
+}
+
+// ---------------------------------------------------------------------------
+// 身份闸门（存储层是最后一道）
+// ---------------------------------------------------------------------------
+//
+// 界面上的"请选择归属"只是第一道保护：`recognize.save` 是后端接口，别的客户端
+// 也能直接调。所以"拿不准就不存"必须在这里成立。
+
+/// 昵称不唯一：拒绝，而不是挑最近更新的那一行写进去。
+#[test]
+fn saving_by_an_ambiguous_nickname_is_refused() {
+    let (mut store, _dir) = temp_store();
+    // 两个服务器上的同名角色：不同游戏ID、同一昵称。
+    save(&mut store, &sample_result("莫莫莫", "111", 1, 1), &[]);
+    save(&mut store, &sample_result("莫莫莫", "222", 2, 2), &[]);
+
+    let mut only_nick = RecognitionResult::new(IdentitySource::Nickname);
+    only_nick.character.nickname = Some("莫莫莫".into());
+    only_nick.currencies.gold = Some(AttributeValue::new(9_999, 0.9, "9,999"));
+
+    let err = store.save_recognition(&only_nick, &[]).unwrap_err();
+    assert!(matches!(err, StoreError::Identity(_)), "{err:?}");
+    assert!(err.to_string().contains("2 个角色"), "{err}");
+
+    // 两行都没被改：金币仍是各自的 1 / 2。
+    for c in store.list_characters().unwrap() {
+        let gold = c.character.latest_currencies.gold.map(|v| v.value);
+        assert!(gold == Some(1) || gold == Some(2), "{gold:?}");
+    }
+}
+
+/// 游戏ID 在库里对应多行（历史脏数据）：同样拒绝，并要求人来处理。
+#[test]
+fn saving_by_an_ambiguous_game_id_is_refused() {
+    let (mut store, _dir) = temp_store();
+    save(&mut store, &sample_result("甲", "429277361", 1, 1), &[]);
+    // 绕过保存流程塞一个重复的游戏ID，模拟老版本留下的重复角色。
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO characters
+             (id, nickname, game_id, latest_stats, latest_currencies, created_at, updated_at)
+             VALUES ('dup', '甲（重复）', '429277361', '{}', '{}', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+    let err = store
+        .save_recognition(&sample_result("甲", "429277361", 5, 6), &[])
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Identity(_)), "{err:?}");
+    assert!(err.to_string().contains("429277361"), "{err}");
+}
+
+/// 明确的 character_id 但库里没有：报错，**不要**顺手新建一行。
+#[test]
+fn an_unknown_explicit_character_id_is_an_error_not_a_new_row() {
+    let (mut store, _dir) = temp_store();
+    let mut r = sample_result("莫莫莫", "429277361", 1, 1);
+    r.character_id = Some("does-not-exist".into());
+
+    let err = store.save_recognition(&r, &[]).unwrap_err();
+    assert!(matches!(err, StoreError::NotFound(_)), "{err:?}");
+    assert!(store.list_characters().unwrap().is_empty());
+}
+
+/// 什么身份都没有：进待归属，不建「未命名角色」，数据一条不丢。
+#[test]
+fn an_identityless_result_becomes_pending_instead_of_a_character() {
+    let (mut store, _dir) = temp_store();
+    let mut bag = RecognitionResult::new(IdentitySource::VisualMatch);
+    bag.currencies.gold = Some(AttributeValue::new(2_625_812, 0.99, "2,625,812"));
+    bag.screenshot_count = 1;
+
+    let pending_id = match store.save_recognition(&bag, &["bag.png".into()]).unwrap() {
+        SaveOutcome::Pending { pending_id, reason } => {
+            assert!(reason.contains("身份信息"), "{reason}");
+            pending_id
+        }
+        other => panic!("应当是待归属：{other:?}"),
+    };
+
+    assert!(store.list_characters().unwrap().is_empty(), "不许建「未命名角色」");
+    let pending = store.list_pending(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, pending_id);
+    assert!(pending[0].has_currencies);
+    assert_eq!(pending[0].screens, vec!["bag.png".to_string()]);
+    assert_eq!(store.pending_count().unwrap(), 1);
+
+    // 指定归属后变成正式快照，待归属行消失。
+    let owner = save(&mut store, &sample_result("莫莫莫", "429277361", 0, 0), &[]);
+    store.assign_pending(&pending_id, &owner).unwrap();
+    assert_eq!(store.list_pending(10).unwrap().len(), 0);
+
+    let snaps = store.list_snapshots(&owner, 10).unwrap();
+    assert_eq!(snaps.len(), 2, "归属时应补一条快照");
+    assert!(snaps
+        .iter()
+        .any(|s| s.currencies.gold.as_ref().map(|v| v.value) == Some(2_625_812)));
+    assert_eq!(
+        store.get_character(&owner).unwrap().character.latest_currencies.gold.unwrap().value,
+        2_625_812
+    );
+}
+
+#[test]
+fn discarding_a_pending_record_deletes_it() {
+    let (mut store, _dir) = temp_store();
+    let mut bag = RecognitionResult::new(IdentitySource::VisualMatch);
+    bag.currencies.silver = Some(AttributeValue::new(50, 0.9, "50"));
+    let pending_id = match store.save_recognition(&bag, &[]).unwrap() {
+        SaveOutcome::Pending { pending_id, .. } => pending_id,
+        other => panic!("应当是待归属：{other:?}"),
+    };
+
+    store.discard_pending(&pending_id).unwrap();
+    assert_eq!(store.pending_count().unwrap(), 0);
+    assert!(store.discard_pending(&pending_id).is_err(), "再删一次应当是 NotFound");
+}
+
+// ---------------------------------------------------------------------------
+// latest_* 的字段级合并（P1）
+// ---------------------------------------------------------------------------
+
+/// 只读到气血的截图不能把上次的魔法/速度抹掉。
+#[test]
+fn a_partial_stats_capture_does_not_erase_the_other_fields() {
+    let (mut store, _dir) = temp_store();
+    let mut full = sample_result("莫莫莫", "429277361", 0, 0);
+    full.stats.hp = Some(AttributeValue::new(5459, 0.99, "5459"));
+    full.stats.mp = Some(AttributeValue::new(3200, 0.99, "3200"));
+    full.stats.speed = Some(AttributeValue::new(800, 0.99, "800"));
+    let id = save(&mut store, &full, &[]);
+
+    let mut partial = RecognitionResult::new(IdentitySource::IdField);
+    partial.character.nickname = Some("莫莫莫".into());
+    partial.character.game_id = Some("429277361".into());
+    partial.stats.hp = Some(AttributeValue::new(5600, 0.99, "5600"));
+    save(&mut store, &partial, &[]);
+
+    let stats = store.get_character(&id).unwrap().character.latest_stats;
+    assert_eq!(stats.hp.map(|v| v.value), Some(5600), "读到的字段要更新");
+    assert_eq!(stats.mp.map(|v| v.value), Some(3200), "没读到的魔法必须保留");
+    assert_eq!(stats.speed.map(|v| v.value), Some(800), "没读到的速度必须保留");
+
+    // 快照是原始观察，不做合并：第二次那条只有 hp。
+    // （同毫秒内的两条快照没有确定先后，所以按内容找，而不是按时间取最新。）
+    let snaps = store.list_snapshots(&id, 10).unwrap();
+    let second = snaps
+        .iter()
+        .find(|s| s.stats.hp.as_ref().map(|v| v.value) == Some(5600))
+        .expect("第二次的快照");
+    assert!(second.stats.mp.is_none(), "历史必须保持每次的原样");
+    assert!(snaps
+        .iter()
+        .any(|s| s.stats.mp.as_ref().map(|v| v.value) == Some(3200)));
+}
+
+/// 只读到金币的截图不能抹掉上次的银币。
+#[test]
+fn a_partial_currency_capture_does_not_erase_the_other_field() {
+    let (mut store, _dir) = temp_store();
+    let id = save(&mut store, &sample_result("莫莫莫", "429277361", 2_000_000, 100), &[]);
+
+    let mut only_gold = RecognitionResult::new(IdentitySource::IdField);
+    only_gold.character.game_id = Some("429277361".into());
+    only_gold.currencies.gold = Some(AttributeValue::new(2_100_000, 0.99, "2,100,000"));
+    save(&mut store, &only_gold, &[]);
+
+    let currencies = store.get_character(&id).unwrap().character.latest_currencies;
+    assert_eq!(currencies.gold.map(|v| v.value), Some(2_100_000));
+    assert_eq!(currencies.silver.map(|v| v.value), Some(100), "银币不能被抹掉");
+}
+
+// ---------------------------------------------------------------------------
+// server 同步（P1）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn updating_an_existing_character_syncs_the_server() {
+    let (mut store, _dir) = temp_store();
+    let id = save(&mut store, &sample_result("莫莫莫", "429277361", 1, 1), &[]);
+    assert!(store.get_character(&id).unwrap().character.server.is_none());
+
+    let mut with_server = sample_result("莫莫莫", "429277361", 1, 1);
+    with_server.character.server = Some("紫禁之巅".into());
+    save(&mut store, &with_server, &[]);
+    assert_eq!(
+        store.get_character(&id).unwrap().character.server.as_deref(),
+        Some("紫禁之巅"),
+        "已有角色也要跟着更新服务器"
+    );
+
+    // 这次没读到服务器：不能把已有的清空。
+    let mut without = sample_result("莫莫莫", "429277361", 1, 1);
+    without.character.server = None;
+    save(&mut store, &without, &[]);
+    assert_eq!(
+        store.get_character(&id).unwrap().character.server.as_deref(),
+        Some("紫禁之巅"),
+        "空值不能覆盖已知的服务器"
+    );
+
+    // 手工更正也能改服务器。
+    store
+        .update_character_identity(&id, None, None, None, Some("生日快乐"))
+        .unwrap();
+    assert_eq!(
+        store.get_character(&id).unwrap().character.server.as_deref(),
+        Some("生日快乐")
+    );
 }
