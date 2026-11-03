@@ -177,7 +177,9 @@ $bodyFile = [System.IO.Path]::GetTempFileName()
 $bodyObj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $bodyFile -Encoding utf8NoBOM
 
 $rel = $null
-try { $rel = Invoke-GitHub -Method GET -Url "$api/releases/tags/$Tag" } catch { $rel = $null }
+# 探测"这个 tag 是否已有 Release"：首次发布必然 404，属预期，别让 curl 把
+# 一行 `curl: (22) ... 404` 打到控制台末尾（看起来像发布失败）。
+try { $rel = Invoke-GitHub -Method GET -Url "$api/releases/tags/$Tag" 2>$null } catch { $rel = $null }
 
 if ($rel) {
     Write-Host "  Release $Tag 已存在（id $($rel.id)），更新正文与产物" -ForegroundColor DarkGray

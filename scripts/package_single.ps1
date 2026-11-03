@@ -108,7 +108,11 @@ try {
         $droppedMb += (Get-ChildItem $d.FullName -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
         Remove-Item -Recurse -Force $d.FullName
     }
-    Get-ChildItem $stageDir -Recurse -File -Include *.pdb | Remove-Item -Force
+    # 显式循环而不是 `... | Remove-Item`：安全删除包装（沙箱/杀软钩子）不一定
+    # 支持管道输入，管道写法会报「输入对象无法绑定到该命令的任何参数」。
+    foreach ($pdb in Get-ChildItem $stageDir -Recurse -File -Include *.pdb) {
+        Remove-Item -LiteralPath $pdb.FullName -Force
+    }
     Write-Host ("  已移除 {0} 个语言目录（{1} MB）与 pdb" -f $drop.Count, [math]::Round($droppedMb,1))
 
     # 单文件不保留启动器脚本：入口由 mhpack 直接调 exe

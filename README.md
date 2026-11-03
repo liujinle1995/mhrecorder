@@ -279,7 +279,7 @@ checkpoint 的事务。
 .\scripts\package_single.ps1
 ```
 
-产物：**`dist\MhRecorder-<版本号>.exe`**（当前 `MhRecorder-0.9.9.exe`，86 MB，
+产物：**`dist\MhRecorder-<版本号>.exe`**（当前 `MhRecorder-0.13.0.exe`，86 MB，
 双击即用，可以单独发给别人）。版本号取自 `MhRecorder.Core/Protocol.cs` 的
 `AppVersion`，打包脚本自动拼进文件名，不需要手改。
 
@@ -299,9 +299,9 @@ checkpoint 的事务。
 
 | 资产 | 说明 |
 |---|---|
-| `MhRecorder-0.9.9.exe` | 单文件便携版，双击即用（推荐） |
-| `MhRecorder-0.9.9-win-x64.zip` | 免安装目录版（`dist\MhRecorder` 整包） |
-| `MhRecorder-0.9.9-SHA256SUMS.txt` | 两个产物的 SHA-256，供下载后核对 |
+| `MhRecorder-0.13.0.exe` | 单文件便携版，双击即用（推荐） |
+| `MhRecorder-0.13.0-win-x64.zip` | 免安装目录版（`dist\MhRecorder` 整包） |
+| `MhRecorder-0.13.0-SHA256SUMS.txt` | 两个产物的 SHA-256，供下载后核对 |
 
 Release 正文自动从 `Changelog.cs` 里抽取当前版本的条目，不用手写更新日志。
 
@@ -354,7 +354,7 @@ WinUI 3 / Windows App SDK 无法静态打包成一个文件，原因有三：
 校验 / 排查用打包机上的 console 工具，而不是分发出去的 GUI 外壳：
 
 ```powershell
-.\src\target\release\mhpack.exe --verify .\dist\MhRecorder-0.9.9.exe   # 校验内置载荷
+.\src\target\release\mhpack.exe --verify .\dist\MhRecorder-0.13.0.exe   # 校验内置载荷
 .\src\target\release\mhpack.exe --extract-to D:\tmp\app                # 解压到指定目录（排查用）
 ```
 
