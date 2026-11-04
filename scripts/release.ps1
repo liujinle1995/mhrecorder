@@ -33,6 +33,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# GitHub 的响应是 UTF-8，而 curl.exe 的输出要经过控制台代码页转一道。
+# 直接 `$out = & curl.exe ...` 再 ConvertFrom-Json，中文（release 正文里全是）
+# 会被按 ANSI 解码成乱码，字节数对不上就报 "Unterminated string"。
+# 让 curl 把响应写进文件，再用 UTF-8 读，绕开控制台编码。
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'version.ps1')
 
@@ -65,16 +72,27 @@ function Get-GitHubToken {
 
 function Invoke-GitHub {
     param([string]$Method, [string]$Url, [string]$BodyFile)
+
+    # 响应落盘再读，见文件头的编码说明。
+    $respFile = [System.IO.Path]::GetTempFileName()
     $curlArgs = @('-sS', '--fail-with-body', '-X', $Method,
                   '-H', "Authorization: Bearer $script:tok",
                   '-H', 'Accept: application/vnd.github+json',
-                  '-H', 'User-Agent: mhrecorder-release')
+                  '-H', 'User-Agent: mhrecorder-release',
+                  '--output', $respFile)
     if ($BodyFile) { $curlArgs += @('-H', 'Content-Type: application/json', '--data-binary', "@$BodyFile") }
     $curlArgs += $Url
-    $out = & curl.exe @curlArgs
-    if ($LASTEXITCODE -ne 0) { throw "GitHub API 失败 ($Method $Url)：$out" }
-    if ([string]::IsNullOrWhiteSpace($out)) { return $null }
-    return ($out | ConvertFrom-Json)
+
+    & curl.exe @curlArgs | Out-Null
+    $code = $LASTEXITCODE
+    $raw = if (Test-Path -LiteralPath $respFile) {
+        [System.IO.File]::ReadAllText($respFile, [System.Text.UTF8Encoding]::new($false))
+    } else { '' }
+    Remove-Item -LiteralPath $respFile -Force -ErrorAction SilentlyContinue
+
+    if ($code -ne 0) { throw "GitHub API 失败 ($Method $Url)：$raw" }
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return ($raw | ConvertFrom-Json)
 }
 
 # 从 Changelog.cs 抽取当前版本的条目，作为 release 正文
@@ -169,8 +187,19 @@ $remoteTag = & git ls-remote --tags origin "refs/tags/$Tag" 2>$null
 if ($remoteTag) {
     Write-Host "  远端已有 $Tag，跳过推送" -ForegroundColor DarkGray
 } else {
-    $pushOut = & git push origin $Tag 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "tag 推送失败：$pushOut" }
+    # git 把进度写到 stderr；在 $ErrorActionPreference='Stop' 下会被当成错误记录抛出去
+    # （上一次就是把"推送成功"报成了失败）。这里临时放宽，只认退出码。
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $pushOut = (& git push origin $Tag 2>&1) -join "`n"
+    $pushCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+
+    if ($pushCode -ne 0) {
+        # 再问一次远端：可能已经推上去了，只是本地退出码被 stderr 搅成了非 0
+        $check = & git ls-remote --tags origin "refs/tags/$Tag" 2>$null
+        if (-not $check) { throw "tag 推送失败：$pushOut" }
+    }
     Write-Host "  已推送 $Tag" -ForegroundColor Green
 }
 
@@ -219,31 +248,42 @@ if (Test-Path -LiteralPath $setupPath) {
     $want = @($want[0], [pscustomobject]@{ File = $setupPath; Asset = $InstallerName }) + $want[1..2]
 }
 
+function Send-Asset {
+    param([string] $File, [string] $Query)
+    # 同样落盘读，别让 curl 的 stderr 在 Stop 模式下变成异常
+    $resp = [System.IO.Path]::GetTempFileName()
+    & curl.exe -sS --fail-with-body -X POST `
+        -H "Authorization: Bearer $script:tok" `
+        -H 'Accept: application/vnd.github+json' `
+        -H 'User-Agent: mhrecorder-release' `
+        -H 'Content-Type: application/octet-stream' `
+        --data-binary "@$File" --output $resp $Query | Out-Null
+    $code = $LASTEXITCODE
+    $body = if (Test-Path -LiteralPath $resp) {
+        [System.IO.File]::ReadAllText($resp, [System.Text.UTF8Encoding]::new($false))
+    } else { '' }
+    Remove-Item -LiteralPath $resp -Force -ErrorAction SilentlyContinue
+    return [pscustomobject]@{ Code = $code; Body = $body }
+}
+
 foreach ($item in $want) {
     $sizeMb = (Get-Item -LiteralPath $item.File).Length / 1MB
     # 注意：必须用 ${uploadBase} 花括号形式，`"$uploadBase?name="` 会被 $? 吃掉
     $q = "${uploadBase}?name=$([uri]::EscapeDataString($item.Asset))"
     Write-Host ("  上传 {0} ({1:N1} MB)..." -f $item.Asset, $sizeMb) -ForegroundColor Gray
-    $out = & curl.exe -sS --fail-with-body -X POST `
-        -H "Authorization: Bearer $script:tok" `
-        -H 'Accept: application/vnd.github+json' `
-        -H 'User-Agent: mhrecorder-release' `
-        -H 'Content-Type: application/octet-stream' `
-        --data-binary "@$($item.File)" $q 2>&1
-    if ($LASTEXITCODE -ne 0) {
+
+    $r = Send-Asset -File $item.File -Query $q
+    if ($r.Code -ne 0) {
         # 同名资产已存在时 GitHub 会 422，先删再传
-        if ($out -match 'already_exists') {
+        if ($r.Body -match 'already_exists') {
             Write-Host "  同名资产已存在，删除后重传" -ForegroundColor DarkYellow
             $assets = Invoke-GitHub -Method GET -Url "$api/releases/$($rel.id)/assets"
             $old = $assets | Where-Object { $_.name -eq $item.Asset } | Select-Object -First 1
             if ($old) { Invoke-GitHub -Method DELETE -Url "$api/releases/assets/$($old.id)" | Out-Null }
-            $out = & curl.exe -sS --fail-with-body -X POST `
-                -H "Authorization: Bearer $script:tok" `
-                -H 'Content-Type: application/octet-stream' `
-                --data-binary "@$($item.File)" $q 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "上传失败：$($item.Asset)`n$out" }
+            $r = Send-Asset -File $item.File -Query $q
+            if ($r.Code -ne 0) { throw "上传失败：$($item.Asset)`n$($r.Body)" }
         } else {
-            throw "上传失败：$($item.Asset)`n$out"
+            throw "上传失败：$($item.Asset)`n$($r.Body)"
         }
     }
     Write-Host "    OK" -ForegroundColor Green
