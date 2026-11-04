@@ -71,6 +71,29 @@ public sealed partial class SettingsViewModel : ObservableObject
     private bool _hasPending;
 
     /// <summary>
+    /// 识别性能档位的三个选项。顺序必须和 <see cref="ProfileIndex"/> 的映射一致。
+    /// </summary>
+    public IReadOnlyList<string> ProfileOptions { get; } = new[]
+    {
+        "低资源 · 2 线程",
+        "平衡 · 4 线程",
+        "高性能 · 按核心数",
+    };
+
+    /// <summary>0 = 低资源, 1 = 平衡, 2 = 高性能。</summary>
+    [ObservableProperty]
+    private int _profileIndex = 1;
+
+    /// <summary>
+    /// 后端实际生效的引擎参数（线程 / 批 / 检测后处理）。
+    ///
+    /// 和下拉框分开显示，是因为"选了高性能但实际只有 4 线程"这种情况必须
+    /// 一眼看得见——档位是意图，这行才是事实。
+    /// </summary>
+    [ObservableProperty]
+    private string _ocrDetailText = "—";
+
+    /// <summary>
     /// False when there is no backend: the page then shows the values as "—" and
     /// every control is disabled, instead of rendering defaults that look like
     /// real settings and then failing to save.
@@ -81,6 +104,49 @@ public sealed partial class SettingsViewModel : ObservableObject
     partial void OnEditableBeforeSaveChanged(bool value) => PersistIfReady();
 
     partial void OnAutoNavigateAfterSaveChanged(bool value) => PersistIfReady();
+
+    partial void OnProfileIndexChanged(int value)
+    {
+        if (_loading) return;
+        _settings.OcrProfile = value switch
+        {
+            0 => "low",
+            2 => "high",
+            _ => "balanced",
+        };
+        OcrDetailText = "正在切换识别引擎…";
+        _ = SaveProfileAsync();
+    }
+
+    /// <summary>
+    /// 保存档位并等后端重建引擎。
+    ///
+    /// 后端把 settings.set 做成"保存 + 就地重建"，所以保存返回时新配置已经
+    /// 生效，紧接着读 version 拿到的就是实际参数，不需要轮询。
+    /// </summary>
+    private async Task SaveProfileAsync()
+    {
+        if (!_backend.IsAvailable)
+        {
+            StatusText = "后端未连接，设置改动不会保存";
+            OcrDetailText = "—";
+            return;
+        }
+        try
+        {
+            _settings.EditableBeforeSave = EditableBeforeSave;
+            _settings.AutoNavigateAfterSave = AutoNavigateAfterSave;
+            await _backend.Api.SetSettingsAsync(_settings);
+            StatusText = $"识别性能已切换 · {DateTime.Now:HH:mm:ss}";
+            await LoadEngineInfoAsync();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write($"SettingsViewModel.SaveProfile failed: {ex}");
+            StatusText = "保存设置失败：" + ex.Message;
+            OcrDetailText = "切换失败";
+        }
+    }
 
     public async Task LoadAsync()
     {
@@ -98,6 +164,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             ChangelogSummary = ChangelogSummaryOf();
             PendingText = "—";
             HasPending = false;
+            OcrDetailText = "—";
             _loading = false;
             return;
         }
@@ -110,6 +177,14 @@ public sealed partial class SettingsViewModel : ObservableObject
             EditableBeforeSave = _settings.EditableBeforeSave;
             AutoNavigateAfterSave = _settings.AutoNavigateAfterSave;
             DataDir = _settings.DataDir;
+            // _loading 期间赋值，OnProfileIndexChanged 只负责回写，不会反过来
+            // 触发一次保存。
+            ProfileIndex = _settings.OcrProfile switch
+            {
+                "low" => 0,
+                "high" => 2,
+                _ => 1,
+            };
             VersionText = $"{ProtocolConstants.AppVersion}（本地版）";
             EngineText = _backend.IsRemote ? "离线 OCR · 不做任何上传（已连接引擎）" : "离线 OCR · 不做任何上传";
         }
@@ -195,6 +270,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 ? $"{(name.Length > 0 ? name : "OCR")} · 已加载"
                 : "OCR · 未加载";
             EngineVersionText = Str("version") is { Length: > 0 } ver ? ver : "—";
+            OcrDetailText = DescribeOcr(info.Value);
 
             var models = engine.TryGetProperty("models", out var arr) && arr.ValueKind == JsonValueKind.Array
                 ? string.Join("、", arr.EnumerateArray().Select(x => x.GetString()))
@@ -206,6 +282,63 @@ public sealed partial class SettingsViewModel : ObservableObject
             AppLog.Write($"SettingsViewModel.LoadEngineInfo failed: {ex}");
             PluginDetailText = "读取失败：" + ex.Message;
         }
+    }
+
+    /// <summary>
+    /// 把 version 里的 ocr 段翻成一句人话：档位 · 线程 · 批 · 检测后处理。
+    ///
+    /// 只显示后端**实际报上来**的值，不按档位推算——推算出来的"高性能"会
+    /// 掩盖重建失败、环境变量覆盖这类真实状态。
+    /// </summary>
+    private static string DescribeOcr(JsonElement info)
+    {
+        if (!info.TryGetProperty("ocr", out var ocr) || ocr.ValueKind != JsonValueKind.Object)
+        {
+            return "—";
+        }
+
+        var profile = ocr.TryGetProperty("profile", out var p) && p.ValueKind == JsonValueKind.String
+            ? p.GetString() ?? ""
+            : "";
+        var cores = ocr.TryGetProperty("cores", out var c) && c.ValueKind == JsonValueKind.Number
+            ? c.GetInt32()
+            : 0;
+
+        string det = "—";
+        var threads = 0;
+        var batch = 0;
+        if (ocr.TryGetProperty("config", out var cfg) && cfg.ValueKind == JsonValueKind.Object)
+        {
+            det = cfg.TryGetProperty("det", out var d) && d.ValueKind == JsonValueKind.String
+                ? d.GetString() ?? "—"
+                : "—";
+            threads = cfg.TryGetProperty("threads", out var t) && t.ValueKind == JsonValueKind.Number
+                ? t.GetInt32()
+                : 0;
+            batch = cfg.TryGetProperty("batchSize", out var b) && b.ValueKind == JsonValueKind.Number
+                ? b.GetInt32()
+                : 0;
+        }
+
+        if (threads == 0 && batch == 0)
+        {
+            return "引擎未加载";
+        }
+
+        var label = profile switch
+        {
+            "low" => "低资源",
+            "high" => "高性能",
+            _ => "平衡",
+        };
+        var detLabel = det switch
+        {
+            "db" => "DB 轮廓",
+            "legacy" => "四邻域",
+            _ => det,
+        };
+        var coreNote = cores > 0 ? $" · {cores} 逻辑核" : "";
+        return $"{label} · {threads} 线程 · 批 {batch} · {detLabel}后处理{coreNote}";
     }
 
     private async void PersistIfReady()

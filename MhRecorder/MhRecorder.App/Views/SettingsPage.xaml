@@ -61,15 +61,35 @@
                         </Grid>
                     </Border>
 
-                    <Border Style="{StaticResource SettingsRowBorder}" MinHeight="58" BorderThickness="0">
+                    <Border Style="{StaticResource SettingsRowBorder}" MinHeight="58">
                         <Grid>
                             <TextBlock Text="识别完成后自动跳转到角色管理" Style="{StaticResource SettingsLabelText}"
-                                       HorizontalAlignment="Left" />
+                                       HorizontalAlignment="Left" VerticalAlignment="Center" />
                             <ToggleSwitch HorizontalAlignment="Right" VerticalAlignment="Center"
                                           Style="{StaticResource DesignToggleStyle}"
                                           AutomationProperties.AutomationId="AutoNavigateToggle"
                                           IsEnabled="{x:Bind ViewModel.IsSettingsEditable, Mode=OneWay}"
                                           IsOn="{x:Bind ViewModel.AutoNavigateAfterSave, Mode=TwoWay}" />
+                        </Grid>
+                    </Border>
+
+                    <!-- 性能档位：识别是 ONNX Runtime 的 CPU 推理，默认用满核心会
+                         把整机拖卡（实测 12 逻辑线程比 4 线程还慢 24%），所以
+                         默认"平衡"，并且把实际生效的参数直接显示出来。 -->
+                    <Border Style="{StaticResource SettingsRowBorder}" MinHeight="58" BorderThickness="0">
+                        <Grid>
+                            <StackPanel Spacing="2" VerticalAlignment="Center" HorizontalAlignment="Left">
+                                <TextBlock Text="识别性能" Style="{StaticResource SettingsLabelText}" />
+                                <TextBlock Text="{x:Bind ViewModel.OcrDetailText, Mode=OneWay}"
+                                           FontSize="11"
+                                           AutomationProperties.AutomationId="OcrDetailText"
+                                           Foreground="{StaticResource TextTertiaryBrush}" />
+                            </StackPanel>
+                            <ComboBox HorizontalAlignment="Right" VerticalAlignment="Center" MinWidth="180"
+                                      AutomationProperties.AutomationId="OcrProfileCombo"
+                                      IsEnabled="{x:Bind ViewModel.IsSettingsEditable, Mode=OneWay}"
+                                      ItemsSource="{x:Bind ViewModel.ProfileOptions}"
+                                      SelectedIndex="{x:Bind ViewModel.ProfileIndex, Mode=TwoWay}" />
                         </Grid>
                     </Border>
                 </StackPanel>

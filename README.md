@@ -82,8 +82,9 @@ mhrecorder/
 │  ├─ test_backend_lifetime.ps1 后端实例锁、空闲自退、多数据目录并存
 │  ├─ test_two_windows.ps1 两个窗口共用一个后端，互不影响
 │  ├─ test_ui_cancel.ps1   界面级验证「取消」按钮真的会停
+│  ├─ test_ocr_profile.ps1 设置档位 → 引擎就地重建 → 重启后保持（21 项）
 │  ├─ verify_vision.ps1    OCR / 特征回归测试
-│  ├─ verify_real_captures.ps1  真机截图验收（33 项，数值逐项对照真图）
+│  ├─ verify_real_captures.ps1  真机截图验收（37 项，数值逐项对照真图）
 │  ├─ package.ps1          打包 dist/（免安装目录版）
 │  ├─ package_single.ps1   打包单文件 exe（自解压）
 │  ├─ package_installer.ps1 用 Inno Setup 打标准安装包（setup.exe）
@@ -156,6 +157,37 @@ cd ..
 **不做在线插件下载**；「检查更新」会如实报告这一点，而不是假装有更新。
 
 设置页还内置「版本更新记录」，列出每个版本对识别与界面的行为变更。
+
+## 识别性能与机器负载
+
+识别是 CPU 上的 ONNX 推理。默认参数偏"低资源"，因为这是交互路径：点一下等
+一两秒，把 12 个逻辑核占满只换来几百毫秒，代价是整机（尤其同时开着模拟器、
+编译、会议）变卡。
+
+| 档位 | 线程 | 批大小 | 适用 |
+|---|---|---|---|
+| 低资源 | 2 | 2 | 同时跑别的重活，或笔记本省电 |
+| 平衡（默认） | 4 | 4 | 一般使用 |
+| 高性能 | 物理核数估算（逻辑核数 / 2，4–8） | 4 | 只跑本程序 |
+
+设置页把**实际生效**的参数直接显示在选项下面（例如「平衡 · 4 线程 · 批 4 ·
+DB 轮廓后处理 · 12 逻辑核」）。切换后引擎就地重建，不用重启。
+
+为什么不默认"用满核心"：在本机（i5-10600，6 核 12 线程）实测同一张 1265×711
+截图，4 线程 1504 ms，运行时默认的 12 线程 1858 ms，16 线程 3201 ms——多出来
+的线程只是在抢内存带宽。
+
+文本框后处理有两套实现（旧的四邻域矩形 / 标准 DB 轮廓），默认用后者，因为
+真实截图上它更快、置信度更高、碎片行更少：
+
+```powershell
+. .\scripts\env.ps1
+.\src\target\release\mhcli.exe ocr-bench --det both --batch 4 --threads 4 `
+    samples\real_character_attributes.png samples\real_inventory.png
+```
+
+排障时可临时覆盖参数：`MH_OCR_DET`、`MH_OCR_BATCH`、`MH_OCR_THREADS`、
+`MH_OCR_MAX_SIDE`、`MH_OCR_PROFILE`（详见 `docs/ARCHITECTURE.md`）。
 
 ## 从源码构建的常见坑（均已在脚本中处理）
 

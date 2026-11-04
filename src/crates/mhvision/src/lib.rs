@@ -71,7 +71,7 @@ pub use identity::{
     associate_by_evidence, plan_batch, BatchPlan, MatchPolicy, ScreenIdentity, VisualAssociation,
 };
 pub use imgops::decode_image;
-pub use ocr::OcrEngine;
+pub use ocr::{DetPostprocess, OcrConfig, OcrEngine, OcrTiming};
 pub use pipeline::{BatchOutcome, RecognitionPipeline};
 pub use thumbnail::{panel_thumb, thumb_similarity, THUMB_SIDE};
 pub use types::{JobControl, NoControl, OcrLine, Result, VisionError};

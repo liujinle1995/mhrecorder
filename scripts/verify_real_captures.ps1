@@ -16,6 +16,8 @@
 # ============================================================================
 
 $ErrorActionPreference = "Stop"
+# 同 verify_vision：原生命令写 stderr 不该让脚本终止。
+$PSNativeCommandUseErrorActionPreference = $false
 $root = Split-Path -Parent $PSScriptRoot
 . "$root\scripts\env.ps1" | Out-Null
 
@@ -88,7 +90,11 @@ Eq "batch physicalDefense"     $r.stats.physicalDefense.value 1609
 Eq "batch gold"                $r.currencies.gold.value 2625812
 Eq "batch silver"              $r.currencies.silver.value 9828458
 Eq "batch screenshotCount = 2" $r.screenshotCount 2
-Check "merged batch has no warning" ($r.warnings.Count -eq 0)
+$unexpectedWarnings = @($r.warnings | Where-Object { $_ -notmatch '没有游戏ID' })
+# 包裹截图没有游戏ID、按同批次的ID归组是**有意**的行为，会留一条说明。
+# 这里断言的是"除了这条说明没有别的警告"——0.13 那句"0 条警告"从 0.14
+# 起必然失败，一直没人注意到。
+Check "merged batch has no unexpected warning" ($unexpectedWarnings.Count -eq 0) ($r.warnings -join ' | ')
 
 # ---------------------------------------------------------------------------
 Write-Host "`n== 4. ID-first persistence flow (the user's stated requirement) ==" -ForegroundColor Cyan

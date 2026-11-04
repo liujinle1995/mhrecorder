@@ -460,6 +460,15 @@ public sealed class Settings
 
     /// <summary>Directory holding the database and exported blobs.</summary>
     public string DataDir { get; set; } = SettingsDefaults.DataDir();
+
+    /// <summary>
+    /// OCR performance profile: "low" (2 threads), "balanced" (4), "high"
+    /// (physical cores).
+    ///
+    /// The backend maps this onto ONNX Runtime's intra-op thread count and the
+    /// recognition batch size, then rebuilds the engine in place — no restart.
+    /// </summary>
+    public string OcrProfile { get; set; } = "balanced";
 }
 
 public static class SettingsDefaults

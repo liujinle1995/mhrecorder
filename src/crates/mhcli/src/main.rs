@@ -12,9 +12,16 @@ use anyhow::{anyhow, Context, Result};
 
 fn main() {
     tracing_subscriber::fmt()
+        // 日志必须走 stderr：`recognize` / `db-stats` 的 stdout 是给脚本
+        // `ConvertFrom-Json` 吃的，混进一行 INFO 就整段解析失败。
+        //
+        // 默认级别压到 warn 也是同理：调用方（验收脚本）用 `2>$null` 收尾，
+        // 在 `$ErrorActionPreference='Stop'` 下任何 stderr 输出都会变成终止
+        // 错误。需要细节时 `RUST_LOG=info` 打开。
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort=warn")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,ort=warn")),
         )
         .with_ansi(false)
         .init();
@@ -44,6 +51,8 @@ fn print_help() {
     println!("  mhcli panel <image>               Print the panel box locate_panel() would crop to");
     println!("  mhcli appearance <image> [attr|bag]  Print the 发色 / 武器 signature");
     println!("  mhcli ocr <image>                 Print every recognised text line");
+    println!("  mhcli ocr-bench [--det legacy|db|both] [--batch N] [--threads N] [--repeat K] <image>...");
+    println!("                                    A/B the detection post-processing and batching");
     println!("  mhcli recognize <image>...        Run the full pipeline, print JSON");
     println!("  mhcli db-init                     Create/open the database and print its path");
     println!("  mhcli db-list                     List stored characters");
@@ -164,6 +173,9 @@ fn run(args: &[String]) -> Result<()> {
             let img = load_image(&args[1])?;
             let mut engine = mhvision::OcrEngine::new(&models_dir())
                 .context("loading OCR models")?;
+            for (k, v) in engine.config().describe().split(' ').filter_map(|kv| kv.split_once('=')) {
+                println!("{k:<10} = {v}");
+            }
             let lines = engine.recognize(&img)?;
             println!("{} lines", lines.len());
             for l in lines {
@@ -171,6 +183,9 @@ fn run(args: &[String]) -> Result<()> {
             }
             Ok(())
         }
+        // A/B 对照：同一张图跑两套检测后处理 / 不同批大小 / 不同线程数，
+        // 把"感觉更快"变成可比较的数字与文本差异。
+        "ocr-bench" => ocr_bench(&args[1..]),
         // Debug helper: 发色 / 武器 the pipeline would record for a capture.
         // Second argument is the panel kind (attr | bag), because the head sits
         // in a different place on each panel.
@@ -371,6 +386,164 @@ fn load_batch(paths: &[String]) -> Result<Vec<image::RgbaImage>> {
     }
     paths.iter().map(|p| load_image(p)).collect()
 }
+
+// ---------------------------------------------------------------------------
+// OCR A/B 基准
+// ---------------------------------------------------------------------------
+//
+// 换检测后处理、改批大小、改线程数，都必须在真实截图上先量一遍再改默认值。
+// 这个子命令把"哪套更准、快多少"变成同一张表上的数字，并且逐行比对两套
+// 后处理读出的文字——行数一样但内容不同，是最容易漏掉的回归。
+
+fn ocr_bench(args: &[String]) -> Result<()> {
+    let mut det = "both".to_string();
+    let mut batch: Option<usize> = None;
+    let mut threads: Option<usize> = None;
+    let mut repeat = 3usize;
+    let mut files: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--det" => {
+                det = args.get(i + 1).context("--det 需要一个值")?.clone();
+                i += 2;
+            }
+            "--batch" => {
+                batch = Some(
+                    args.get(i + 1)
+                        .context("--batch 需要一个数字")?
+                        .parse()
+                        .context("--batch 不是数字")?,
+                );
+                i += 2;
+            }
+            "--threads" => {
+                threads = Some(
+                    args.get(i + 1)
+                        .context("--threads 需要一个数字")?
+                        .parse()
+                        .context("--threads 不是数字")?,
+                );
+                i += 2;
+            }
+            "--repeat" => {
+                repeat = args
+                    .get(i + 1)
+                    .context("--repeat 需要一个数字")?
+                    .parse::<usize>()
+                    .context("--repeat 不是数字")?
+                    .max(1);
+                i += 2;
+            }
+            other => {
+                files.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    if files.is_empty() {
+        return Err(anyhow!("ocr-bench 需要至少一张图片"));
+    }
+
+    let modes: Vec<mhvision::DetPostprocess> = if det.eq_ignore_ascii_case("both") {
+        vec![mhvision::DetPostprocess::Legacy, mhvision::DetPostprocess::Db]
+    } else {
+        vec![mhvision::DetPostprocess::parse(&det)
+            .ok_or_else(|| anyhow!("--det 只接受 legacy / db / both"))?]
+    };
+
+    let base = mhvision::OcrConfig::from_env();
+    let effective_batch = batch.unwrap_or(base.batch_size).max(1);
+    let effective_threads = threads.unwrap_or(base.intra_threads);
+    println!(
+        "# batch={effective_batch} threads={effective_threads} repeat={repeat} mods={}",
+        modes.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(",")
+    );
+
+    // 每个模式只建一次引擎：建会话本身几百毫秒，不能算进单图耗时。
+    let mut engines: Vec<(mhvision::DetPostprocess, mhvision::OcrEngine)> = Vec::new();
+    for m in &modes {
+        let cfg = mhvision::OcrConfig {
+            det: *m,
+            batch_size: effective_batch,
+            intra_threads: effective_threads,
+            ..base.clone()
+        };
+        let engine = mhvision::OcrEngine::with_config(&models_dir(), cfg)
+            .context("loading OCR models")?;
+        engines.push((*m, engine));
+    }
+
+    let mut diff_total = 0usize;
+    for f in &files {
+        let img = load_image(f)?;
+        let name = Path::new(f)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| f.clone());
+        println!("\n== {name} ({}x{})", img.width(), img.height());
+
+        let mut texts: Vec<(mhvision::DetPostprocess, Vec<String>)> = Vec::new();
+        for (mode, engine) in engines.iter_mut() {
+            let (mut best, mut sum) = (f64::MAX, 0.0f64);
+            let (mut det_best, mut rec_best) = (f64::MAX, f64::MAX);
+            let (mut lines_n, mut conf, mut last) = (0usize, 0.0f64, Vec::new());
+            for _ in 0..repeat {
+                let started = std::time::Instant::now();
+                let (lines, timing) = engine.recognize_with_timing(&img)?;
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                best = best.min(ms);
+                sum += ms;
+                det_best = det_best.min(timing.det_ms);
+                rec_best = rec_best.min(timing.rec_ms);
+                lines_n = lines.len();
+                conf = if lines.is_empty() {
+                    0.0
+                } else {
+                    lines.iter().map(|l| l.confidence).sum::<f64>() / lines.len() as f64
+                };
+                last = lines.into_iter().map(|l| l.text).collect();
+            }
+            println!(
+                "   {:<7} lines={:<4} conf={:.3}  min={:>6.0}ms (det={:>5.0} rec={:>5.0})  avg={:>6.0}ms",
+                mode.as_str(),
+                lines_n,
+                conf,
+                best,
+                det_best,
+                rec_best,
+                sum / repeat as f64
+            );
+            texts.push((*mode, last));
+        }
+
+        if texts.len() == 2 {
+            let a: std::collections::BTreeSet<&String> = texts[0].1.iter().collect();
+            let b: std::collections::BTreeSet<&String> = texts[1].1.iter().collect();
+            let only_a: Vec<&&String> = a.difference(&b).collect();
+            let only_b: Vec<&&String> = b.difference(&a).collect();
+            println!(
+                "   text: {} only={}  {} only={}",
+                texts[0].0.as_str(),
+                only_a.len(),
+                texts[1].0.as_str(),
+                only_b.len()
+            );
+            for t in only_a.iter().take(6) {
+                println!("     - {t}");
+            }
+            for t in only_b.iter().take(6) {
+                println!("     + {t}");
+            }
+            diff_total += only_a.len() + only_b.len();
+        }
+    }
+
+    println!("\n# 文本差异合计 {diff_total} 条（0 = 两套后处理在同一批图上读出完全相同的文字）");
+    Ok(())
+}
+
 
 // ---------------------------------------------------------------------------
 // 批量评估

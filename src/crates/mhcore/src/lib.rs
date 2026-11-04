@@ -607,6 +607,90 @@ pub struct StatisticsPayload {
     pub recent: Vec<AssetPoint>,
 }
 
+/// OCR 性能档位（用户可见的三个选项）。
+///
+/// 为什么是档位而不是"直接填线程数"：绝大多数人不该被迫理解 intra-op 线程。
+/// 需要一个旋钮解决的是"识别时机器变卡"，不是"我想要 3.5 个线程"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OcrProfile {
+    /// 低资源：2 线程 + 小批，识别慢一点，别的程序不受影响。
+    Low,
+    /// 平衡（默认）：最多 4 线程，批大小 6。
+    Balanced,
+    /// 高性能：按 CPU 核心数给线程，批大小 8。
+    High,
+}
+
+impl Default for OcrProfile {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+impl OcrProfile {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" | "eco" => Some(Self::Low),
+            "balanced" | "normal" | "" => Some(Self::Balanced),
+            "high" | "max" => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Balanced => "balanced",
+            Self::High => "high",
+        }
+    }
+
+    /// 本机可用逻辑并行度（至少 1）。
+    pub fn cores() -> usize {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).max(1)
+    }
+
+    /// 估算物理核心数。
+    ///
+    /// 只拿得到逻辑核数（i5-10600 报 12，实际 6 核），而 ONNX Runtime 的算子内
+    /// 线程数接近物理核数才有意义：实测 12 逻辑线程跑同一张图比 4 线程慢 24%，
+    /// 16 线程慢一倍多——多出来的线程只在抢内存带宽。
+    pub fn physical_cores() -> usize {
+        (Self::cores() / 2).max(1)
+    }
+
+    /// ONNX Runtime 算子内线程数。
+    pub fn threads(self) -> usize {
+        let logical = Self::cores();
+        match self {
+            Self::Low => 2.min(logical).max(1),
+            Self::Balanced => 4.min(logical).max(1),
+            Self::High => Self::physical_cores().clamp(4, 8).min(logical).max(1),
+        }
+    }
+
+    /// 识别批大小。
+    ///
+    /// 上限压到 4 是量出来的：识别模型有 6625 个输出类别，批再大，输出张量
+    /// 就冲破 L3（i5-10600 12 MB），batch 6/8 的识别耗时反而比 4 高 37%/84%。
+    pub fn batch_size(self) -> usize {
+        match self {
+            Self::Low => 2,
+            Self::Balanced | Self::High => 4,
+        }
+    }
+}
+
+/// 未知档位不该把整份设置变成默认值，所以单独降级。
+fn de_ocr_profile<'de, D>(d: D) -> std::result::Result<OcrProfile, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(d)?;
+    Ok(raw.as_deref().and_then(OcrProfile::parse).unwrap_or_default())
+}
+
 /// User-facing settings, persisted alongside the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -617,6 +701,9 @@ pub struct Settings {
     pub auto_navigate_after_save: bool,
     /// Directory holding the database and exported blobs.
     pub data_dir: String,
+    /// OCR 性能档位：决定 ONNX Runtime 线程数与识别批大小。
+    #[serde(default, deserialize_with = "de_ocr_profile")]
+    pub ocr_profile: OcrProfile,
 }
 
 impl Default for Settings {
@@ -625,6 +712,7 @@ impl Default for Settings {
             editable_before_save: true,
             auto_navigate_after_save: false,
             data_dir: default_data_dir(),
+            ocr_profile: OcrProfile::default(),
         }
     }
 }

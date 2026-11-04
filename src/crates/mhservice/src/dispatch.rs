@@ -321,6 +321,20 @@ fn dispatch_inner(
             "pid": std::process::id(),
             "dataDir": state.data_dir(),
             "connections": state.connections(),
+            // OCR 运行时参数：profile 是用户选的档位，config 是真正生效的
+            // 配置。设置页把两者都显示出来，"选了高性能但线程还是 4"这种
+            // 情况能立刻看见，而不是靠猜。
+            "ocr": {
+                "profile": state.ocr_profile().as_str(),
+                "cores": mhcore::OcrProfile::cores(),
+                "config": state.ocr_config().map(|c| json!({
+                    "det": c.det.as_str(),
+                    "batchSize": c.batch_size,
+                    "threads": c.intra_threads,
+                    "maxSide": c.max_side,
+                    "summary": c.describe(),
+                })).unwrap_or(Value::Null),
+            },
             // The recogniser is treated as a pluggable unit so the UI can
             // report exactly which engine produced a given result, and so
             // alternative engines can be registered later without a UI change.
@@ -423,7 +437,10 @@ fn dispatch_inner(
             let settings: Settings = serde_json::from_value(req.params.clone())
                 .map_err(|e| DispatchError::new(errcode::BAD_REQUEST, e.to_string()))?;
             state.with_store_mut(|s| s.save_settings(&settings)).map_err(store_err)?;
-            Ok(json!({ "ok": true }))
+            // 档位改了就地重建识别引擎：让用户"改完不用重启"是这里唯一
+            // 值得付出的复杂度（重建一次约几百毫秒，设置变更本来就很稀疏）。
+            let applied = state.apply_ocr_profile(settings.ocr_profile);
+            Ok(json!({ "ok": true, "ocrReloaded": applied }))
         }
         method::EXPORT_JSON => export_json(state, &req.params),
         method::EXPORT_CSV => export_csv(state, &req.params),
@@ -467,7 +484,7 @@ fn engine_plugin_json(state: &Arc<AppState>) -> Value {
         "runtime": "onnxruntime-cpu",
         "models": ["ch_PP-OCRv4_det_infer.onnx", "ch_PP-OCRv4_rec_infer.onnx"],
         "active": ready,
-        "detail": if ready { "已加载" } else { state.pipeline_error().unwrap_or("未加载") },
+        "detail": if ready { "已加载".to_string() } else { state.pipeline_error().unwrap_or_else(|| "未加载".into()) },
         // Extra engines are deliberately not auto-downloaded: this stays
         // offline-first. The flag tells the UI whether online plugin updates
         // are possible in this build.
@@ -500,7 +517,7 @@ fn recognize(
             errcode::OCR,
             format!(
                 "识别引擎不可用：{}",
-                state.pipeline_error().unwrap_or("模型未加载")
+                state.pipeline_error().unwrap_or_else(|| "模型未加载".into())
             ),
         ));
     }

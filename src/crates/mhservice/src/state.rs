@@ -6,7 +6,7 @@
 //! 流水线是**可选**的：模型缺失时仍然照常服务存储/设置/导出类方法，只在真正
 //! 要识别时给出明确错误。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,7 +18,14 @@ pub struct AppState {
     store: Mutex<mhstore::Store>,
     pipeline: Mutex<Option<mhvision::RecognitionPipeline>>,
     /// Why the pipeline is unavailable, surfaced through `recognize`.
-    pipeline_error: Option<String>,
+    ///
+    /// 放 Mutex 里是因为它必须能随"重建引擎"一起更新：换了性能档位以后
+    /// 界面看到的失败原因不能还是上一次的。
+    pipeline_error: Mutex<Option<String>>,
+    /// 模型目录：重建引擎时还要用，不能只在构造时借一下。
+    models_dir: PathBuf,
+    /// 当前生效的 OCR 性能档位。
+    ocr_profile: Mutex<mhcore::OcrProfile>,
     /// 请求边界（消息大小、图片数量、连接数、执行预算）。
     pub limits: Limits,
     /// 正在跑的任务，支持查询与取消。
@@ -63,22 +70,20 @@ impl AppState {
         limits: Limits,
     ) -> anyhow::Result<Arc<Self>> {
         let store = mhstore::Store::open_in_data_dir(data_dir)?;
-        let (pipeline, pipeline_error) = match mhvision::RecognitionPipeline::new(models_dir) {
-            Ok(p) => {
-                tracing::info!("OCR pipeline loaded from {}", models_dir.display());
-                (Mutex::new(Some(p)), None)
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                tracing::warn!("OCR pipeline unavailable ({msg}); storage-only mode");
-                (Mutex::new(None), Some(msg))
-            }
-        };
+        // 性能档位在启动时从设置里取；环境变量可覆盖（实测与排障用）。
+        // 读设置失败不该拦住后端启动——退回默认档位即可。
+        let profile = std::env::var("MH_OCR_PROFILE")
+            .ok()
+            .and_then(|v| mhcore::OcrProfile::parse(&v))
+            .unwrap_or_else(|| store.load_settings().unwrap_or_default().ocr_profile);
+        let (pipeline, pipeline_error) = build_pipeline(models_dir, profile);
         tracing::info!("{}", limits.describe());
         Ok(Arc::new(Self {
             store: Mutex::new(store),
-            pipeline,
-            pipeline_error,
+            pipeline: Mutex::new(pipeline),
+            pipeline_error: Mutex::new(pipeline_error),
+            models_dir: models_dir.to_path_buf(),
+            ocr_profile: Mutex::new(profile),
             limits,
             tasks: Arc::new(Registry::default()),
             data_dir: data_dir.to_string(),
@@ -87,6 +92,47 @@ impl AppState {
             last_activity_ms: AtomicI64::new(now_ms()),
             shutdown: AtomicBool::new(false),
         }))
+    }
+
+    /// 当前 OCR 性能档位。
+    pub fn ocr_profile(&self) -> mhcore::OcrProfile {
+        *self.ocr_profile.lock().expect("profile mutex poisoned")
+    }
+
+    /// 实际生效的引擎配置（det / batch / threads），给 `version` 与日志用。
+    ///
+    /// 与档位分开报：档位是"用户选的"，配置是"真的跑起来的"，两者不一致时
+    /// （比如环境变量覆盖、或重建失败）看这个才知道。
+    pub fn ocr_config(&self) -> Option<mhvision::OcrConfig> {
+        self.with_pipeline(|p| p.ocr_config().clone())
+    }
+
+    /// 按新档位重建识别引擎。
+    ///
+    /// 返回 `true` 表示真的换了引擎。重建失败时保留旧引擎——用户的识别能力
+    /// 不该因为改了个性能设置就消失。
+    pub fn apply_ocr_profile(&self, profile: mhcore::OcrProfile) -> bool {
+        if profile == self.ocr_profile() {
+            return false;
+        }
+        let (pipeline, error) = build_pipeline(&self.models_dir, profile);
+        match pipeline {
+            Some(p) => {
+                *self.pipeline.lock().expect("pipeline mutex poisoned") = Some(p);
+                *self.pipeline_error.lock().expect("error mutex poisoned") = None;
+                *self.ocr_profile.lock().expect("profile mutex poisoned") = profile;
+                tracing::info!(
+                    "OCR profile -> {} ({} threads)",
+                    profile.as_str(),
+                    profile.threads()
+                );
+                true
+            }
+            None => {
+                tracing::warn!("OCR rebuild for profile {} failed: {:?}", profile.as_str(), error);
+                false
+            }
+        }
     }
 
     /// 后端服务的数据目录（绝对路径）。前端拿它校验归属。
@@ -147,11 +193,11 @@ impl AppState {
 
     /// True when recognition can actually run.
     pub fn recognition_available(&self) -> bool {
-        self.pipeline_error.is_none()
+        self.pipeline_error.lock().expect("error mutex poisoned").is_none()
     }
 
-    pub fn pipeline_error(&self) -> Option<&str> {
-        self.pipeline_error.as_deref()
+    pub fn pipeline_error(&self) -> Option<String> {
+        self.pipeline_error.lock().expect("error mutex poisoned").clone()
     }
 
     /// Run a read-only store operation.
@@ -184,6 +230,44 @@ impl AppState {
         let result = self.with_store_mut(|s| s.record_task(task));
         if let Err(e) = result {
             tracing::warn!("task history not persisted: {e}");
+        }
+    }
+}
+
+/// 把用户档位翻译成引擎配置。
+///
+/// 环境变量优先：实测脚本要能临时钉住线程数/批大小，而界面上的档位是给人
+/// 用的粗粒度旋钮，两者不该互相踩。
+fn config_for_profile(profile: mhcore::OcrProfile) -> mhvision::OcrConfig {
+    let mut cfg = mhvision::OcrConfig::from_env();
+    if std::env::var("MH_OCR_THREADS").is_err() {
+        cfg.intra_threads = profile.threads();
+    }
+    if std::env::var("MH_OCR_BATCH").is_err() {
+        cfg.batch_size = profile.batch_size();
+    }
+    cfg
+}
+
+/// 建流水线；失败不 panic，把原因交给调用方决定怎么提示。
+fn build_pipeline(
+    models_dir: &Path,
+    profile: mhcore::OcrProfile,
+) -> (Option<mhvision::RecognitionPipeline>, Option<String>) {
+    match mhvision::RecognitionPipeline::with_config(models_dir, config_for_profile(profile)) {
+        Ok(p) => {
+            tracing::info!(
+                "OCR pipeline loaded from {} (profile={}, {})",
+                models_dir.display(),
+                profile.as_str(),
+                p.ocr_config().describe()
+            );
+            (Some(p), None)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            tracing::warn!("OCR pipeline unavailable ({msg}); storage-only mode");
+            (None, Some(msg))
         }
     }
 }

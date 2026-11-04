@@ -96,6 +96,19 @@ impl RecognitionPipeline {
         Ok(Self { engine: OcrEngine::new(models_dir)? })
     }
 
+    /// 用显式配置建流水线（线程数 / 批大小 / 检测后处理）。
+    ///
+    /// 配置来自用户的"性能档位"，所以必须能在运行时重建——`mhservice` 在
+    /// 设置变更后会丢掉旧流水线、按新配置再建一个。
+    pub fn with_config(models_dir: &Path, config: crate::ocr::OcrConfig) -> Result<Self> {
+        Ok(Self { engine: OcrEngine::with_config(models_dir, config)? })
+    }
+
+    /// 当前引擎配置，供 `version` 回报与日志核对。
+    pub fn ocr_config(&self) -> &crate::ocr::OcrConfig {
+        self.engine.config()
+    }
+
     /// Recognize a batch of screenshots belonging to one character.
     ///
     /// `known` carries the characters already in the database so identity

@@ -20,6 +20,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# 原生命令（cargo / mhcli）往 stderr 写进度是正常的，但 Stop 模式会把它当成
+# 终止错误，脚本就会在"编译进度条"这种无关输出上挂掉。
+$PSNativeCommandUseErrorActionPreference = $false
 
 $root = Split-Path -Parent $PSScriptRoot
 $samples = Join-Path $root "samples"
@@ -180,8 +183,16 @@ if ($SkipTests) {
     # test profile. Do not switch this to --release.
     Push-Location (Join-Path $root "src")
     try {
-        $test = & cargo test -p mhvision 2>&1
+        # 不能写 `cargo test ... 2>&1`：编译进度走 stderr，会被当成 ErrorRecord，
+        # 在 Stop 模式下直接把脚本打断（只在需要重新编译时暴露，所以一直是
+        # "偶尔失败"）。整段重定向到文件，并临时放宽 EAP。
+        $logFile = Join-Path ([System.IO.Path]::GetTempPath()) "mhvision-test.log"
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & cargo test -p mhvision *> $logFile
         $testOk = ($LASTEXITCODE -eq 0)
+        $ErrorActionPreference = $prevEap
+        $test = Get-Content -LiteralPath $logFile -Encoding utf8
         $summary = ($test | Select-String -Pattern "test result:.*" | Select-Object -Last 1)
         Assert-That -Name "cargo test -p mhvision" -Condition $testOk `
                     -Observed ($(if ($summary) { $summary.Line.Trim() } else { "no summary line" }))

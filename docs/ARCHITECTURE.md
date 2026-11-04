@@ -70,8 +70,8 @@ OpenCV 4.12 world 已 vendor，ONNX Runtime 1.31.1 已 vendor（`ort` 用 `load-
 
 | method | params | result |
 |---|---|---|
-| `ping` | `{}` | `{"status":"ready","version":"0.16.0","protocol":2}` |
-| `version` | `{}` | `{"backend":"0.16.0","protocol":2,"models":"ppocrv4","pid":1234,"dataDir":"C:\\…\\MhRecorder","connections":1}` |
+| `ping` | `{}` | `{"status":"ready","version":"0.17.0","protocol":2}` |
+| `version` | `{}` | `{"backend":"0.17.0","protocol":2,"models":"ppocrv4","pid":1234,"dataDir":"C:\\…\\MhRecorder","connections":1,"ocr":{"profile":"balanced","cores":12,"config":{"det":"db","batchSize":4,"threads":4,"maxSide":1280,"summary":"…"}}}` |
 | `recognize` | `{"images":[{"name":"a.png","data":"<base64>"}]}` | `RecognitionResult`（**同步**，连接被占到底；只给 mhcli / 测试用） |
 | `recognize.start` | `{"images":[…]}` | `{"taskId":"t1-…","state":"pending"}`（**立刻返回**，OCR 在后台线程） |
 | `tasks.get` | `{"id":"…","consume":true}` | `{"id":"…","state":"running","elapsedMs":820,"terminal":false}`；终态时附 `result` 或 `error`，且只给一次 |
@@ -83,7 +83,7 @@ OpenCV 4.12 world 已 vendor，ONNX Runtime 1.31.1 已 vendor（`ort` 用 `load-
 | `characters.delete` | `{"id":"..."}` | `{"ok":true}` |
 | `statistics.get` | `{"recentLimit":5}` | `{"summary":AssetSummary,"characters":[CharacterAssetBar...],"recent":[AssetPoint...]}` |
 | `settings.get` | `{}` | `Settings` |
-| `settings.set` | `Settings` | `{"ok":true}` |
+| `settings.set` | `Settings`（含 `ocrProfile`） | `{"ok":true,"ocrReloaded":true}`；档位变化时后端就地重建识别会话 |
 | `export.json` | `{"path":"C:\\..."}` | `{"path":"...","bytes":123}` |
 | `export.csv` | `{"path":"..."}` | `{"path":"...","bytes":123}` |
 | `export.zip` | `{"path":"..."}` | `{"path":"...","bytes":123}` |
@@ -292,6 +292,59 @@ let (result, _) = merge_included(&scans, &plan, …);     // 只合并 included
 * 写入失败只记日志（缓存是优化，不该让识别结果作废）；`MAX_IMAGE_FEATURES = 2000`。
 * `BatchOutcome { result, cached_screens, computed }` 把"哪些命中、哪些新算"交给
   `mhservice`：流水线不碰存储，落库策略属于服务层。
+
+## OCR 引擎参数（检测后处理 / 批处理 / 线程数）
+
+引擎配置集中在 `mhvision::OcrConfig`，由 `mhservice` 按用户档位
+（`mhcore::OcrProfile`）填好再建会话。
+
+### 检测后处理：两套实现并存
+
+`DetPostprocess::{Legacy, Db}`。`Legacy` 是 0.16 及之前的行为（固定 0.22
+阈值 + 四邻域漫游 + 按高度 40% 外扩），`Db` 是标准 DB 后处理：
+
+```
+概率图 → 阈值 0.30 二值化 → findContours(RETR_EXTERNAL)
+      → minAreaRect → 框内平均概率 < 0.60 丢弃
+      → dist = area × unclip_ratio(1.5) / perimeter
+      → 旋转矩形外扩 → 取轴对齐外包框 → 缩放回原图
+```
+
+两套都保留，是因为换后处理会连带改变行数、行高与阅读顺序，而字段提取是按行
+做启发式的。默认值必须有真实截图上的对照数据：
+
+| 样本 | Legacy | Db |
+|---|---|---|
+| `real_character_attributes.png` | 56 行 / 0.906 / 1874 ms | **48 行 / 0.934 / 1160 ms** |
+| `real_inventory.png` | 26 行 / 0.905 / 971 ms | **23 行 / 0.922 / 827 ms** |
+| `real_window_capture.png` | 59 行 / 0.880 / 1299 ms | **48 行 / 0.924 / 1162 ms** |
+
+（同一台 i5-10600，4 线程、批 4、repeat 2 取最小值；`verify_real_captures.ps1`
+的 36 项数值断言在两种模式下完全一致。）
+
+### 批处理
+
+识别模型输入 `[N,3,48,W]`，N 与 W 都是动态维度。裁切图按"宽度向上对齐到 32"
+分桶，同桶内按 `batch_size` 凑批一次推理，再按原索引还原。批大小上限压到 4：
+识别输出有 6625 个类别，批再大就冲破 L3，实测识别耗时 batch 4 → 6 → 8 是
+659 → 900 → 1211 ms。
+
+### 线程数
+
+`intra_op_num_threads` 显式设置，不交给运行时默认值（= 全部逻辑核）：
+
+| 线程 | 2 | 4 | 12（默认） | 16 |
+|---|---|---|---|---|
+| 单图耗时 | 1544 ms | **1504 ms** | 1858 ms | 3201 ms |
+
+`OcrProfile`：`low` = 2 线程/批 2，`balanced` = 4/4（默认），`high` = 物理核数
+估算（逻辑核数 / 2，夹在 4..8）/批 4。改档位时 `settings.set` 会就地重建会话，
+`version` 回报的 `ocr.config` 是**实际生效**的参数。
+
+排障用环境变量覆盖：`MH_OCR_DET=legacy|db`、`MH_OCR_BATCH`、`MH_OCR_THREADS`、
+`MH_OCR_MAX_SIDE`、`MH_OCR_BIN_THRESH` / `MH_OCR_BOX_THRESH` / `MH_OCR_UNCLIP`、
+`MH_OCR_PROFILE`。`mhcli ocr-bench --det both --batch 4 --threads 4 <图片…>`
+可以在任意截图集上重跑上面这两张表。
 
 ## 窗口尺寸策略
 
