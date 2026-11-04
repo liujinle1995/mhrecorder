@@ -50,6 +50,14 @@ public sealed class RecognitionService
         {
             return new RecognizeOutcome(null, "识别已取消", true);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 兜底：正常路径下取消会以 BackendException(cancelled) 回来（后端确认
+            // 停下后我们才收尾）。但调用方若在别的 await 上被取消，这里别把它变成
+            // "识别失败：A task was canceled."——用户点的是取消，不是遇到故障。
+            AppLog.Write("RecognitionService: cancelled by caller before the backend reported");
+            return new RecognizeOutcome(null, "识别已取消", true);
+        }
         catch (BackendException ex) when (ex.Code == ErrorCodes.Timeout)
         {
             return new RecognizeOutcome(null, "识别超时：截图过多或分辨率过高，试试一次只导入 1–2 张", true);

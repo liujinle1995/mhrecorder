@@ -117,9 +117,13 @@ pub fn run_server(name: &str, state: Arc<AppState>) -> std::io::Result<()> {
             // Leak the PipeHandle's Drop: the File now owns the handle.
             std::mem::forget(pipe);
 
-            if let Err(e) = service_connection(file, state) {
+            // 生命周期计数交给 AppState：它要在最后一个客户端离开后决定
+            // 什么时候自己退出（前端崩溃时没人会替它发关停请求）。
+            state.connection_opened();
+            if let Err(e) = service_connection(file, Arc::clone(&state)) {
                 tracing::warn!("connection ended: {e}");
             }
+            state.connection_closed();
         });
     }
 }

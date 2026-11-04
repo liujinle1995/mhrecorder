@@ -78,6 +78,10 @@ mhrecorder/
 │  ├─ make_samples.py      生成合成测试截图
 │  ├─ make_icon.ps1        生成安装包图标（packaging/mhrecorder.ico）
 │  ├─ test_pipe_e2e.ps1    管道端到端测试
+│  ├─ test_async_tasks.ps1 协议级验证识别可取消（start / get / cancel / shutdown）
+│  ├─ test_backend_lifetime.ps1 后端实例锁、空闲自退、多数据目录并存
+│  ├─ test_two_windows.ps1 两个窗口共用一个后端，互不影响
+│  ├─ test_ui_cancel.ps1   界面级验证「取消」按钮真的会停
 │  ├─ verify_vision.ps1    OCR / 特征回归测试
 │  ├─ verify_real_captures.ps1  真机截图验收（33 项，数值逐项对照真图）
 │  ├─ package.ps1          打包 dist/（免安装目录版）
@@ -162,14 +166,21 @@ cd ..
    `scripts/env.ps1` 与 `dist/run.ps1` 都设置了 `ORT_DYLIB_PATH`；
    另外 `mhservice`/`mhcli` 的 `main` 会**自动**把 `ORT_DYLIB_PATH` 指向与自己同目录的
    `onnxruntime.dll`，所以即使不设环境变量也能正常加载。
-3. **必须先启动 `mhservice.exe` 再开界面**。界面通过命名管道连接后端。
-   启动器（单文件 exe）会先拉起后端并等管道就绪；**等不到就弹窗报「后端启动失败」
-   并退出**，不会把界面拉起来。
-   直接运行 `MhRecorder.exe`（绕过启动器）且后端没起时，正式版会在标题栏下方
-   常驻一条红色横幅说明「未连接本地识别引擎，识别/保存/导出都不可用」，
-   识别与保存按钮点了只会报错——**不会退回演示数据**。
-   `dist/run.ps1` 同样会自动拉起后端并等待就绪，状态栏显示「已连接本地识别引擎」
-   且没有横幅，才表示真的连上了。
+3. **后端不用手工启动**。界面自己负责：连不上管道就拉起同目录的 `mhservice.exe`
+   并等它就绪（最多 8 秒）。启动器（单文件 exe / `dist\run.ps1`）只是提前把后端
+   拉好，两种入口行为一致。
+
+   生命周期也归后端：同一数据目录只允许一个实例（独占锁），关窗口时前端只发
+   `system.shutdown`，后端自己判断还有没有别的客户端；最后一个客户端走了、空闲
+   8 秒自行退出。所以两个窗口可以共用一个后端，先关哪个都不会打断另一个，
+   前端被强杀也不会留下常驻进程。
+
+   连不上时界面会在标题栏下方常驻一条红色横幅说明原因（找不到 mhservice.exe /
+   启动超时 / 管道被另一个数据目录的后端占着），识别与保存按钮点了只会报错——
+   **不会退回演示数据**。
+
+   `version` 返回的 `pid` / `dataDir` 是归属校验依据：连到的后端若不是本程序
+   该用的那个数据目录，界面会明确报错，而不是往错误的库里写。
 
 ## 直接双击 `mhservice.exe` 报 “找不到 opencv_world4120.dll”
 

@@ -20,7 +20,11 @@ use serde_json::Value;
 
 /// Current protocol version. The client refuses to talk to a backend built
 /// against a different major version.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// v2：识别从"一个请求跑到底"改成 `recognize.start` + `tasks.get` 轮询，
+///     并新增 `system.shutdown`。老客户端不会调这些方法（同步 `recognize`
+///     仍在），但新客户端遇到老后端会一直查不到任务，所以版本必须区分开。
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// 识别分析（特征 + OCR）的算法版本。
 ///
@@ -81,6 +85,16 @@ pub mod method {
     pub const PING: &str = "ping";
     pub const VERSION: &str = "version";
     pub const RECOGNIZE: &str = "recognize";
+    /// 异步识别：立刻返回 `taskId`，OCR 在后台线程跑。
+    ///
+    /// 同步版 `recognize` 的问题不是"慢"，而是**同一条连接串行**：识别跑完
+    /// 之前服务端读不到这条连接上的下一条请求，`tasks.cancel` 只能排在它后面，
+    /// 等轮到自己时任务早已结束。真正的取消必须先让出连接。
+    pub const RECOGNIZE_START: &str = "recognize.start";
+    /// 查任务状态；终态时带 `result`（只返回一次）。
+    pub const TASKS_GET: &str = "tasks.get";
+    /// 请后端退出。只在没有其他客户端时生效，避免 A 窗口关掉 B 窗口的后端。
+    pub const SYSTEM_SHUTDOWN: &str = "system.shutdown";
     pub const RECOGNIZE_SAVE: &str = "recognize.save";
     pub const CHARACTERS_LIST: &str = "characters.list";
     pub const CHARACTERS_GET: &str = "characters.get";
@@ -127,6 +141,11 @@ pub mod errcode {
     pub const TOO_MANY_CONNECTIONS: &str = "tooManyConnections";
     /// 身份不唯一 / 无证据：拒绝自动归属，需要人来决定。
     pub const IDENTITY_AMBIGUOUS: &str = "identityAmbiguous";
+    /// `tasks.get` 查不到这个 id（可能已被清理，或不属于这个后端实例）。
+    pub const TASK_NOT_FOUND: &str = "taskNotFound";
+    /// 已有识别在跑。OCR 会话是独占的，排队只会让等待时间不可预测，
+    /// 所以明确拒绝，由前端决定是"等"还是"取消前一个"。
+    pub const TASK_BUSY: &str = "taskBusy";
 }
 
 #[cfg(test)]

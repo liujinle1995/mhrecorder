@@ -96,10 +96,9 @@ public sealed partial class MainWindow : Window
         {
             App.Log("MainWindow closing");
 
-            // 后端如果是界面自己拉起来的（开始菜单 / 双击 exe 的常规路径），
-            // 退出时一并关掉：不给用户留一个占着两个 DLL 和 500MB 内存的空转进程。
-            // 由 run.ps1 或终端手动启动的不动。
-            BackendLauncher.StopSpawned();
+            // 只管"断开 + 请后端退出"，不杀进程：后端自己知道还有没有别的窗口连着。
+            // 另一个窗口还开着时它会拒绝关停，先关的这个就不会打断后关的。
+            AppHost.Backend.ShutdownBackend();
         };
     }
 

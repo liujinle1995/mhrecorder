@@ -107,6 +107,9 @@ public sealed partial class ImportViewModel : ObservableObject
     private IReadOnlyList<ImageFile> _batch = Array.Empty<ImageFile>();
     private string? _savedIdentityFrom;
 
+    /// <summary>当前这次识别的取消源。一次识别一个，按下"取消"就置位。</summary>
+    private CancellationTokenSource? _recognitionCts;
+
     public ImportViewModel(
         BackendService backend,
         ImageImportService images,
@@ -136,6 +139,13 @@ public sealed partial class ImportViewModel : ObservableObject
 
     [ObservableProperty]
     private bool _isBusy;
+
+    /// <summary>
+    /// 正在识别（可取消）。和 <see cref="IsBusy"/> 的区别：IsBusy 还涵盖保存、
+    /// 读取窗口之类不可取消的等待，只有识别会显示"取消"按钮。
+    /// </summary>
+    [ObservableProperty]
+    private bool _isRecognizing;
 
     [ObservableProperty]
     private string _busyText = "正在识别截图…";
@@ -404,6 +414,29 @@ public sealed partial class ImportViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 取消正在跑的识别。
+    ///
+    /// 只做一件事：给 CancellationToken 置位。真正的停止发生在后端——它在下一张
+    /// 图的边界上收手（OpenCV/ORT 都是同步调用，没法硬中断）。所以界面不能假装
+    /// "已经取消"，按钮文字改成"正在停止…"，等请求以 cancelled 终态返回再恢复。
+    /// </summary>
+    [RelayCommand]
+    private void CancelRecognition()
+    {
+        if (!IsRecognizing) return;
+
+        BusyText = "正在停止（当前这张图处理完就停）…";
+        try
+        {
+            _recognitionCts?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // 刚好在收尾，忽略。
+        }
+    }
+
     [RelayCommand]
     private void ClearPreview()
     {
@@ -636,6 +669,9 @@ public sealed partial class ImportViewModel : ObservableObject
 
         BusyText = "正在识别截图…";
         IsBusy = true;
+        IsRecognizing = true;
+        _recognitionCts?.Dispose();
+        _recognitionCts = new CancellationTokenSource();
         HintMessage = null;
         IsHintOpen = false;
         try
@@ -645,7 +681,7 @@ public sealed partial class ImportViewModel : ObservableObject
             _batch = batch;
             ShowPreview(batch, source);
 
-            var outcome = await _recognition.RecognizeAsync(batch);
+            var outcome = await _recognition.RecognizeAsync(batch, _recognitionCts.Token);
             if (outcome.Result is null)
             {
                 Result = null;
@@ -668,6 +704,11 @@ public sealed partial class ImportViewModel : ObservableObject
         finally
         {
             IsBusy = false;
+            IsRecognizing = false;
+            BusyText = "正在识别截图…";
+
+            _recognitionCts?.Dispose();
+            _recognitionCts = null;
         }
     }
 

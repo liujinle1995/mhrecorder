@@ -8,6 +8,7 @@ using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using MhRecorder.Core.Models;
+using MhRecorder.Core.Services;
 
 namespace MhRecorder.Core;
 
@@ -219,8 +220,118 @@ public sealed class NamedPipeClient : IDisposable
     public Task<JsonElement?> GetEngineInfoAsync(CancellationToken ct = default) =>
         CallAsync(Methods.Version, new { }, ct);
 
-    public Task<RecognitionResult?> RecognizeAsync(IEnumerable<RecognizeImage> images, CancellationToken ct = default) =>
-        CallAsync<RecognitionResult>(Methods.Recognize, new { Images = images }, ct);
+    /// <summary>
+    /// 识别：`recognize.start` 拿 taskId，然后轮询 `tasks.get` 直到终态。
+    /// </summary>
+    /// <remarks>
+    /// 为什么不能还用同步 `recognize`：服务端一条连接一个线程、请求串行处理，
+    /// 同步识别会把连接占到底，`tasks.cancel` 排在它后面，等轮到时任务早跑完了。
+    /// 所以取消在旧协议下**不可能**生效，不是实现 bug，是协议形状的问题。
+    ///
+    /// 这里的取消流程：ct 触发 → 发一次 `tasks.cancel` → 继续轮询到终态。
+    /// 轮询本身不受 ct 影响（它就是要读终态的那个动作），只是把等待变成
+    /// "正在停止…"而不是立刻返回——否则界面会不知道后端到底停没停。
+    /// </remarks>
+    public async Task<RecognitionResult?> RecognizeAsync(
+        IEnumerable<RecognizeImage> images, CancellationToken ct = default)
+    {
+        // start 这一步**不接受取消**：它只是一个登记请求（几毫秒到几百毫秒，
+        // 取决于要传多少 base64）。如果在半路放弃，会出现最糟的情况——后端已经
+        // 建好任务并开始 OCR，而我们没拿到 taskId，既取消不了，还会让下一次
+        // start 撞上 taskBusy。所以把 ct 留给后面的轮询，那里才是等待发生的地方。
+        var started = await CallAsync(Methods.RecognizeStart, new { Images = images }, CancellationToken.None)
+            .ConfigureAwait(false);
+        var taskId = started is { } payload && payload.TryGetProperty("taskId", out var idElement)
+            ? idElement.GetString()
+            : null;
+        if (string.IsNullOrEmpty(taskId))
+            throw new BackendException(ErrorCodes.Internal, "后端没有返回 taskId，无法跟踪这次识别");
+
+        var cancelSent = false;
+        // 轮询间隔：前 20 次用 120 ms（短任务基本立刻出结果），之后退到 400 ms，
+        // 免得一次几十秒的识别打出上千条请求。
+        var interval = TimeSpan.FromMilliseconds(120);
+        var polls = 0;
+
+        while (true)
+        {
+            if (ct.IsCancellationRequested && !cancelSent)
+            {
+                cancelSent = true;
+                try
+                {
+                    await CallAsync(Methods.TasksCancel, new { Id = taskId }, CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // 取消请求失败不影响继续读终态：任务可能刚好自己结束了。
+                    AppLog.Write($"NamedPipeClient: tasks.cancel failed: {ex.Message}");
+                }
+            }
+
+            JsonElement? snapshot;
+            try
+            {
+                snapshot = await CallAsync(Methods.TasksGet, new { Id = taskId }, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (BackendException ex) when (ex.Code == ErrorCodes.TaskNotFound)
+            {
+                throw new BackendException(
+                    ErrorCodes.Cancelled, "识别任务已结束或被清理（后端可能重启过）");
+            }
+
+            if (snapshot is not { } snap)
+                throw new BackendException(ErrorCodes.Internal, "后端没有返回任务状态");
+
+            var state = snap.TryGetProperty("state", out var s) ? s.GetString() ?? "" : "";
+            switch (state)
+            {
+                case "completed":
+                    if (snap.TryGetProperty("result", out var result) &&
+                        result.ValueKind == JsonValueKind.Object)
+                        return Json.DeserializeElement<RecognitionResult>(result);
+                    throw new BackendException(ErrorCodes.Internal, "识别任务完成但没有结果");
+
+                case "cancelled":
+                    throw new BackendException(ErrorCodes.Cancelled, "识别已取消");
+
+                case "timeout":
+                    throw new BackendException(ErrorCodes.Timeout, "识别超时");
+
+                case "failed":
+                    var code = ErrorCodes.Internal;
+                    var message = "识别失败";
+                    if (snap.TryGetProperty("error", out var err) && err.ValueKind == JsonValueKind.Object)
+                    {
+                        if (err.TryGetProperty("code", out var c)) code = c.GetString() ?? code;
+                        if (err.TryGetProperty("message", out var m)) message = m.GetString() ?? message;
+                    }
+                    throw new BackendException(code, message);
+            }
+
+            polls++;
+            if (polls > 20) interval = TimeSpan.FromMilliseconds(400);
+            // 不能传 ct：取消后还要继续读到终态。
+            await Task.Delay(interval, CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>查一次任务状态（调试/诊断用；正常路径由 <see cref="RecognizeAsync"/> 内部轮询）。</summary>
+    public Task<JsonElement?> TaskGetAsync(string taskId, bool consume = false, CancellationToken ct = default) =>
+        CallAsync(Methods.TasksGet, new { Id = taskId, Consume = consume }, ct);
+
+    /// <summary>请求取消一个任务。返回后状态是 <c>cancelling</c>，等终态要再查。</summary>
+    public Task<JsonElement?> TaskCancelAsync(string taskId, CancellationToken ct = default) =>
+        CallAsync(Methods.TasksCancel, new { Id = taskId }, ct);
+
+    /// <summary>
+    /// 请后端退出。只有后端确认"没有别的客户端"时才真的会退，
+    /// 所以两个窗口共用一个后端时，关掉其中一个不会把另一个的打掉。
+    /// </summary>
+    public Task<JsonElement?> ShutdownAsync(bool force = false, CancellationToken ct = default) =>
+        CallAsync(Methods.SystemShutdown, new { Force = force }, ct);
 
     public Task<JsonElement?> SaveRecognitionAsync(RecognitionResult result, IEnumerable<string> screens, CancellationToken ct = default) =>
         CallAsync(Methods.RecognizeSave, new { Result = result, Screens = screens }, ct);

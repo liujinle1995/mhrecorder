@@ -70,9 +70,11 @@ OpenCV 4.12 world 已 vendor，ONNX Runtime 1.31.1 已 vendor（`ort` 用 `load-
 
 | method | params | result |
 |---|---|---|
-| `ping` | `{}` | `{"status":"ready","version":"0.9.2","protocol":1}` |
-| `version` | `{}` | `{"backend":"0.9.2","protocol":1,"models":"ppocrv4"}` |
-| `recognize` | `{"images":[{"name":"a.png","data":"<base64>"}]}` | `RecognitionResult` |
+| `ping` | `{}` | `{"status":"ready","version":"0.16.0","protocol":2}` |
+| `version` | `{}` | `{"backend":"0.16.0","protocol":2,"models":"ppocrv4","pid":1234,"dataDir":"C:\\…\\MhRecorder","connections":1}` |
+| `recognize` | `{"images":[{"name":"a.png","data":"<base64>"}]}` | `RecognitionResult`（**同步**，连接被占到底；只给 mhcli / 测试用） |
+| `recognize.start` | `{"images":[…]}` | `{"taskId":"t1-…","state":"pending"}`（**立刻返回**，OCR 在后台线程） |
+| `tasks.get` | `{"id":"…","consume":true}` | `{"id":"…","state":"running","elapsedMs":820,"terminal":false}`；终态时附 `result` 或 `error`，且只给一次 |
 | `recognize.save` | `{"result":RecognitionResult,"screens":["a.png"]}` | `{"characterId":"…","pending":false}` 或 `{"characterId":null,"pending":true,"pendingId":"…","message":"…"}` |
 | `characters.list` | `{}` | `{"characters":[CharacterDetail...]}` |
 | `characters.get` | `{"id":"..."}` | `CharacterDetail` |
@@ -90,7 +92,43 @@ OpenCV 4.12 world 已 vendor，ONNX Runtime 1.31.1 已 vendor（`ort` 用 `load-
 | `pending.assign` | `{"id":"…","characterId":"…"}` | `{"characterId":"…","pending":false}` |
 | `pending.discard` | `{"id":"…"}` | `{"ok":true}` |
 | `tasks.list` | `{"limit":20}` | `{"running":[…],"history":[…]}` |
-| `tasks.cancel` | `{"id":"…"}` | `{"cancelled":true,"id":"…"}` |
+| `tasks.cancel` | `{"id":"…"}` | `{"cancelled":true,"id":"…","state":"cancelling"}`；未知 id 返回 `taskNotFound` |
+| `system.shutdown` | `{"force":false}` | `{"shuttingDown":true,"clients":1}`；还有别的客户端时 `{"shuttingDown":false,"clients":2}` |
+
+### 为什么识别要拆成 start / get / cancel
+
+管道是「一条连接一个线程，请求串行」。同步 `recognize` 一旦发出，服务端就在这条
+连接上跑到 OCR 结束，**期间读不到这条连接上的任何后续请求**——包括 `tasks.cancel`。
+所以 0.15 及以前的取消在协议层面不可能生效：`taskId` 是随结果一起返回的，用户
+点取消时前端连要取消谁都不知道。
+
+v2 改成：
+
+```
+recognize.start ──> {taskId}          立刻返回，连接马上空出来
+       │
+       ├─ tasks.get {id}              每 120–400ms 查一次状态
+       └─ tasks.cancel {id}           用户点取消，同一条连接、立刻被处理
+                                       状态 running → cancelling → cancelled
+```
+
+任务状态机见 `src/crates/mhservice/src/tasks.rs`：`pending / running / cancelling /
+cancelled / completed / failed / timeout`。取消是协作式的（OpenCV / ONNX Runtime
+都是同步调用），粒度是一张图，所以 `cancelling` 是真实存在、可能停留若干秒的状态。
+
+识别是**独占**的：已有任务在跑时 `recognize.start` 返回 `taskBusy`，不排队。
+
+### 实例身份与生命周期
+
+后端 `version` 会报出 `pid` 与 `dataDir`，前端据此判断"连着的到底是谁"。后端启动
+时按数据目录加独占锁（`mhservice.lock`，共享模式 0），同一目录不可能有两个实例；
+进程退出即释放，不留僵尸锁。
+
+关停由后端裁决：`system.shutdown` 只在没有其他客户端时生效，其余情况返回当前
+连接数。前端不再"谁拉起来谁杀掉"——两个窗口共用一个后端时，先关的那个不会打断
+后关的那个。最后一个客户端断开后，后端在 8 秒宽限期（`MH_IDLE_EXIT_SEC` 可调）
+后自行退出，所以前端崩溃也不会留下常驻进程。
+
 
 `CharacterDetail` 形如 `{"character":Character,"snapshotCount":3,"lastRecordedAt":123456}`。
 所有 JSON 字段均为 camelCase，与 `mhcore` 的 serde 配置一致。

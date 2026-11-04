@@ -66,6 +66,74 @@ fn resolve_models_dir() -> PathBuf {
     PathBuf::from("models")
 }
 
+/// 同一数据目录只允许一个后端。
+///
+/// 做法是"共享模式 0"的独占 open：**看的不是文件内容，而是句柄**。第二个
+/// 进程打开会拿到 ERROR_SHARING_VIOLATION(32)，进程退出后锁自动释放，不会
+/// 留下需要清理的"僵尸锁"。
+///
+/// 为什么不按进程名判断：`Process.GetProcessesByName("mhservice")` 会把别的
+/// 目录、别的用户会话、甚至另一份便携版的同名进程都算进来，然后据此做出
+/// "后端已经在跑"或"把它杀掉"的决定——两个判断都可能是错的。
+fn acquire_instance_lock(data_dir: &str) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let dir = std::path::Path::new(data_dir);
+    std::fs::create_dir_all(dir)?;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(dir.join("mhservice.lock"))
+}
+
+/// 生命周期看门狗：后端自己决定什么时候退出。
+///
+/// 两个触发条件：
+/// * `system.shutdown`（前端关窗口时发）——立刻走，但要等 200 ms 让响应先写回；
+/// * 一个客户端都没有、且已经空闲超过宽限期——兜底，前端崩溃/被强杀时用。
+///
+/// 前端因此不需要知道"是谁拉起的后端"，更不需要杀进程。
+fn spawn_lifecycle_watchdog(state: Arc<state::AppState>) {
+    let spawned = std::thread::Builder::new()
+        .name("lifecycle".into())
+        .spawn(move || {
+            let idle_after = state.idle_exit_after();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+
+                if state.shutdown_requested() {
+                    tracing::info!("收到关停请求，正在退出");
+                    state.tasks.cancel_all();
+                    // 让 system.shutdown 的响应先写回管道再退出。
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    break;
+                }
+
+                if state.has_served() && state.connections() == 0 {
+                    let idle = state.idle_ms();
+                    if idle >= idle_after.as_millis() as i64 {
+                        tracing::info!(
+                            "已经 {} ms 没有客户端，后端自行退出",
+                            idle
+                        );
+                        state.tasks.cancel_all();
+                        break;
+                    }
+                }
+            }
+
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            std::process::exit(0);
+        });
+
+    if let Err(e) = spawned {
+        tracing::warn!("lifecycle watchdog 启动失败（后端将不会自动退出）：{e}");
+    }
+}
+
 fn main() {
     // The backend runs detached from the launcher, so it is a GUI-subsystem
     // binary and never allocates a console of its own.
@@ -123,6 +191,20 @@ fn main() {
         return;
     }
 
+    // 同一数据目录只允许一个后端实例。必须在 open 数据库之前拿到，
+    // 否则第二个实例会先打开 SQLite、再发现抢不到锁，日志里留下一串
+    // "database is locked" 的噪声。
+    let _instance_lock = match acquire_instance_lock(&data_dir) {
+        Ok(f) => f,
+        Err(e) => {
+            emit(
+                true,
+                &format!("另一个后端已经在服务数据目录 {data_dir}，本实例退出：{e}"),
+            );
+            std::process::exit(3);
+        }
+    };
+
     let state = match state::AppState::new(&models_dir, &data_dir) {
         Ok(s) => s,
         Err(e) => {
@@ -134,6 +216,8 @@ fn main() {
     tracing::info!("models dir: {}", models_dir.display());
     tracing::info!("data dir:   {data_dir}");
     tracing::info!("listening on pipe {}", pipe::PIPE_NAME);
+
+    spawn_lifecycle_watchdog(Arc::clone(&state));
 
     // Signal readiness to the parent process before blocking on accept. Written
     // through `emit` because stdout does not exist in the detached case and a

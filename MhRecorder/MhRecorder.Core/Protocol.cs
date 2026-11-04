@@ -9,8 +9,15 @@ namespace MhRecorder.Core;
 public static class ProtocolConstants
 {
     public const string PipeName = "mhrecorder.v1";
-    public const int Version = 1;
-    public const string AppVersion = "0.15.0";
+
+    /// <summary>
+    /// Wire protocol version. v2 起识别走 `recognize.start` + `tasks.get` 轮询，
+    /// 并新增 `system.shutdown`；版本不一致直接拒绝，不做"尽力兼容"——
+    /// 让 0.16 的界面去连 0.15 的后端，表现是"识别永远没有结果"，远不如
+    /// 一条明确的版本不符提示。
+    /// </summary>
+    public const int Version = 2;
+    public const string AppVersion = "0.16.0";
 }
 
 /// <summary>Canonical method names (mirror of `protocol::method`).</summary>
@@ -19,6 +26,16 @@ public static class Methods
     public const string Ping = "ping";
     public const string Version = "version";
     public const string Recognize = "recognize";
+
+    /// <summary>Async recognition: returns a taskId immediately, OCR runs in the background.</summary>
+    public const string RecognizeStart = "recognize.start";
+
+    /// <summary>Poll a task; carries the result once it reaches a terminal state.</summary>
+    public const string TasksGet = "tasks.get";
+
+    /// <summary>Ask the backend to exit — only honoured when no other client is connected.</summary>
+    public const string SystemShutdown = "system.shutdown";
+
     public const string RecognizeSave = "recognize.save";
     public const string CharactersList = "characters.list";
     public const string CharactersGet = "characters.get";
@@ -74,6 +91,12 @@ public static class ErrorCodes
 
     /// <summary>All backend connections are in use.</summary>
     public const string TooManyConnections = "tooManyConnections";
+
+    /// <summary>`tasks.get` 查不到这个任务 id。</summary>
+    public const string TaskNotFound = "taskNotFound";
+
+    /// <summary>已有识别在跑（OCR 会话独占，不排队）。</summary>
+    public const string TaskBusy = "taskBusy";
 
     /// <summary>
     /// Identity is not unique (two rows share the 游戏ID / nickname) or has no

@@ -119,6 +119,32 @@ public sealed class BackendService
         return true;
     }
 
+    /// <summary>
+    /// 关窗口时调用：先放掉自己的连接，再请后端退出。
+    ///
+    /// 顺序很重要——后端是按"还有几个客户端连着"来决定能不能退的，本进程的
+    /// 连接不放掉，自己就会被算成那个"别的窗口"。前端被强杀时这段不会执行，
+    /// 后端靠零连接 + 空闲超时自己收尾。
+    /// </summary>
+    public void ShutdownBackend()
+    {
+        if (_api is RemoteAppService remote)
+        {
+            try
+            {
+                remote.Client.Dispose();
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write($"BackendService: closing our connection failed: {ex.Message}");
+            }
+            _api = new UnavailableAppService("正在退出");
+            State = BackendState.Unavailable;
+        }
+
+        BackendLauncher.RequestShutdown();
+    }
+
     private static (IAppService Api, BackendState State, string? Reason) Probe()
     {
         // 调试构建的 UI 开发开关：MH_FORCE_DEMO=1 在看板/布局调整时顶替真后端。
@@ -136,19 +162,10 @@ public sealed class BackendService
         }
 #endif
 
-        // 先直连（启动器已经把后端拉好了的情况，绝大多数）；连不上再自己拉起
-        // 同目录的 mhservice.exe——从开始菜单 / 桌面快捷方式直接启动时没有启动器。
-        RemoteAppService? remote = null;
-        try
-        {
-            remote = RemoteAppService.TryCreate();
-        }
-        catch (Exception ex)
-        {
-            AppLog.Write($"BackendService: remote connect failed: {ex.Message}");
-        }
-
-        remote ??= BackendLauncher.ConnectOrStart();
+        // 连不上就自己拉起同目录的 mhservice.exe（从开始菜单 / 桌面快捷方式
+        // 直接启动时没有启动器）。归属校验（数据目录、协议版本）也在里面，
+        // 不再靠"进程名像不像"判断。
+        var remote = BackendLauncher.ConnectOrStart();
 
         if (remote is not null)
         {

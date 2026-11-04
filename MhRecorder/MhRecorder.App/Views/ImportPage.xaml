@@ -272,6 +272,15 @@
                                 <TextBlock Text="{x:Bind ViewModel.BusyText, Mode=OneWay}"
                                            FontSize="12" VerticalAlignment="Center"
                                            Foreground="{StaticResource TextSecondaryBrush}" />
+                                <!-- 只有识别能取消；保存/读取窗口这类等待没有取消按钮，
+                                     免得点下去什么都不发生。 -->
+                                <Button Content="取消"
+                                        AutomationProperties.AutomationId="CancelRecognitionButton"
+                                        Command="{x:Bind ViewModel.CancelRecognitionCommand}"
+                                        Visibility="{x:Bind ViewModel.IsRecognizing, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
+                                        Padding="10,2" MinHeight="24" FontSize="12"
+                                        VerticalAlignment="Center"
+                                        Foreground="{StaticResource TextSecondaryBrush}" />
                             </StackPanel>
                         </Border>
                     </Grid>

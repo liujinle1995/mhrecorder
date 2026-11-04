@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::state::AppState;
-use crate::tasks::Control;
+use crate::tasks::{CancelOutcome, Control};
 
 /// Handle one raw request line and produce the raw response line.
 ///
@@ -34,35 +34,58 @@ pub fn handle_line(state: &Arc<AppState>, line: &str) -> String {
     crate::pipe::encode_line(&response).unwrap_or_else(|_| "{\"id\":0,\"ok\":false}\n".into())
 }
 
-/// 哪些方法算"任务"（需要登记生命周期、可取消耗时、可被取消）。
+/// 哪些方法算"任务"（同步路径里需要登记生命周期、可取消耗时、可被取消）。
 fn is_tracked(method: &str) -> bool {
     matches!(method, method::RECOGNIZE)
 }
 
 fn dispatch(state: &Arc<AppState>, req: &Request) -> Response {
+    // 这三个方法必须**不占连接**地应答，所以单独走：
+    //   recognize.start —— 只登记，立刻返回 taskId，OCR 在后台线程；
+    //   tasks.get       —— 轮询状态，终态时带回结果；
+    //   system.shutdown —— 关停请求。
+    //
+    // 同步 `recognize` 保留给 mhcli 与测试：它跟以前一样把连接占到底。
+    // 界面不能再用它——那正是"取消不生效"的根因。
+    match req.method.as_str() {
+        method::RECOGNIZE_START => return respond(state, req, recognize_start(state, &req.params)),
+        method::TASKS_GET => return respond(state, req, tasks_get(state, &req.params)),
+        method::SYSTEM_SHUTDOWN => return respond(state, req, system_shutdown(state, &req.params)),
+        _ => {}
+    }
+
     let started = Instant::now();
     let (task_id, control) = if is_tracked(&req.method) {
-        let (id, c) = state.tasks.begin(&req.method, state.limits.max_request_duration);
-        (Some(id), Some(c))
+        // 同步识别同样要占引擎：别的窗口正在跑异步任务时，这里也必须拒绝，
+        // 否则两个 OCR 会在同一份会话上互相抢锁。
+        match state.tasks.begin(&req.method, state.limits.max_request_duration) {
+            Ok((id, c)) => (Some(id), Some(c)),
+            Err(_) => {
+                return Response::err(
+                    req.id,
+                    errcode::TASK_BUSY,
+                    "已有识别任务在跑，请等它结束或先取消",
+                );
+            }
+        }
     } else {
         (None, None)
     };
+
+    if let Some(id) = task_id.as_deref() {
+        state.tasks.mark_running(id);
+    }
 
     let outcome = dispatch_inner(state, req, control.as_ref());
 
     let elapsed = started.elapsed();
     if elapsed >= state.limits.slow_request {
-        tracing::warn!(
-            "慢请求 {} 用了 {} ms",
-            req.method,
-            elapsed.as_millis()
-        );
+        tracing::warn!("慢请求 {} 用了 {} ms", req.method, elapsed.as_millis());
     }
 
     match outcome {
         Ok(mut value) => {
             if let (Some(id), Some(obj)) = (task_id.as_ref(), value.as_object_mut()) {
-                // 客户端拿到 taskId 就可以在用户点"取消"时调 tasks.cancel。
                 obj.insert("taskId".into(), json!(id));
             }
             finish_task(state, task_id.as_deref(), None);
@@ -75,9 +98,162 @@ fn dispatch(state: &Arc<AppState>, req: &Request) -> Response {
     }
 }
 
+/// 协议版本闸门。
+///
+/// 客户端显式带了 `protocol` 就必须一致；不带也可以（老的 CLI 请求），但带错
+/// 版本绝不放行——两端对不上时继续跑只会产生难以解释的结果。
+///
+/// 放在这里而不是只在 `dispatch_inner` 里，是因为 `recognize.start` /
+/// `tasks.get` / `system.shutdown` 走的是"不占连接"的快速路径，不经过
+/// `dispatch_inner`，漏掉的话恰恰是最新的三个方法没有版本保护。
+fn proto_check(params: &Value) -> DResult<()> {
+    if let Some(client) = params.get("protocol").and_then(Value::as_u64) {
+        if client != PROTOCOL_VERSION as u64 {
+            return Err(DispatchError::new(
+                errcode::PROTOCOL_MISMATCH,
+                format!(
+                    "协议版本不兼容：客户端 v{client}，后端 v{PROTOCOL_VERSION}。请让两端使用同一个版本"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 统一收口：计时、慢请求日志、`DResult` → `Response`。
+fn respond(state: &Arc<AppState>, req: &Request, outcome: DResult<Value>) -> Response {
+    let started = Instant::now();
+    match outcome {
+        Ok(value) => {
+            let elapsed = started.elapsed();
+            if elapsed >= state.limits.slow_request {
+                tracing::warn!("慢请求 {} 用了 {} ms", req.method, elapsed.as_millis());
+            }
+            Response::ok(req.id, value)
+        }
+        Err(err) => Response::err(req.id, err.code, err.message),
+    }
+}
+
+/// `recognize.start`：登记任务 → 起工作线程 → 立刻返回 `taskId`。
+///
+/// 参数校验故意留到工作线程里做：把 base64 解码放在这里等于又占住了连接，
+/// 而"取消"要的正是这条连接空着。校验失败会通过 `tasks.get` 的 `failed`
+/// 状态回来，前端的错误提示路径不用分叉。
+fn recognize_start(state: &Arc<AppState>, params: &Value) -> DResult<Value> {
+    proto_check(params)?;
+    let (id, control) = state
+        .tasks
+        .begin(method::RECOGNIZE_START, state.limits.max_request_duration)
+        .map_err(|_| {
+            DispatchError::new(
+                errcode::TASK_BUSY,
+                "已有识别任务在跑。等它结束，或先取消那一个再开始新的",
+            )
+        })?;
+
+    let task_state = Arc::clone(state);
+    let task_id = id.clone();
+    let task_params = params.clone();
+    let spawn = std::thread::Builder::new()
+        .name(format!("recognize-{task_id}"))
+        .spawn(move || {
+            task_state.tasks.mark_running(&task_id);
+            let result = recognize(&task_state, &task_params, Some(&control));
+            let outcome = match result {
+                Ok(value) => crate::tasks::TaskOutcome::ok(value),
+                Err(err) => crate::tasks::TaskOutcome::err(err.code, err.message),
+            };
+            if let Some(record) = task_state.tasks.complete(&task_id, outcome) {
+                task_state.record_task(&record);
+            }
+            task_state.tasks.prune();
+        });
+
+    if let Err(e) = spawn {
+        // 线程都起不来就别留一个永远 Pending 的任务让前端轮询到死。
+        if let Some(record) = state
+            .tasks
+            .complete(&id, crate::tasks::TaskOutcome::err(errcode::INTERNAL, e.to_string()))
+        {
+            state.record_task(&record);
+        }
+        return Err(DispatchError::new(
+            errcode::INTERNAL,
+            format!("无法启动识别线程：{e}"),
+        ));
+    }
+
+    Ok(json!({ "taskId": id, "state": "pending" }))
+}
+
+/// `tasks.get`：查状态；到终态时把结果交出去（只交一次）。
+fn tasks_get(state: &Arc<AppState>, params: &Value) -> DResult<Value> {
+    proto_check(params)?;
+    let id = req_string(params, "id")?;
+    // 默认取走结果：前端拿一次就够，反复拉几十 MB 的 JSON 没有意义。
+    // 调试时传 consume=false 可以反复看同一帧。
+    let consume = params.get("consume").and_then(Value::as_bool).unwrap_or(true);
+
+    let Some(snap) = state.tasks.snapshot(&id, consume) else {
+        return Err(DispatchError::new(
+            errcode::TASK_NOT_FOUND,
+            format!("找不到任务 {id}（可能已被清理，或属于另一个后端实例）"),
+        ));
+    };
+
+    let mut obj = json!({
+        "id": snap.id,
+        "method": snap.method,
+        "state": snap.state.as_str(),
+        "startedAt": snap.started_at,
+        "elapsedMs": snap.elapsed_ms,
+        "terminal": snap.state.is_terminal(),
+    });
+
+    if let Some(outcome) = snap.outcome {
+        if let Some(value) = outcome.value {
+            obj["result"] = value;
+        }
+        if let Some(code) = outcome.code {
+            obj["error"] = json!({ "code": code, "message": outcome.message });
+        }
+    }
+
+    Ok(obj)
+}
+
+/// `system.shutdown`：请后端退出。
+///
+/// 关键规则：**只有确认没有别的客户端时才退出**。两个窗口连同一个后端时，
+/// 关掉其中一个不该把另一个的后端也带走——这正是 0.15 里 `Kill(spawned)`
+/// 的坑。`force` 只给命令行/测试用。
+fn system_shutdown(state: &Arc<AppState>, params: &Value) -> DResult<Value> {
+    let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
+    let clients = state.connections();
+
+    if clients > 1 && !force {
+        tracing::info!("拒绝关停：还有 {clients} 个客户端连着");
+        return Ok(json!({
+            "shuttingDown": false,
+            "clients": clients,
+            "message": "还有其他窗口连着这个后端，不关停",
+        }));
+    }
+
+    state.request_shutdown();
+    tracing::info!("已接受关停请求（连接数 {clients}）");
+    Ok(json!({ "shuttingDown": true, "clients": clients }))
+}
+
 fn finish_task(state: &Arc<AppState>, task_id: Option<&str>, code: Option<&str>) {
     let Some(id) = task_id else { return };
-    if let Some(record) = state.tasks.finish(id, code) {
+    let outcome = match code {
+        None => crate::tasks::TaskOutcome::ok(Value::Null),
+        // 同步路径的"结果"已经随响应返回了，这里只为落一行历史。
+        Some(c) => crate::tasks::TaskOutcome::err(c, c),
+    };
+    if let Some(record) = state.tasks.complete(id, outcome) {
         state.record_task(&record);
     }
     state.tasks.prune();
@@ -118,18 +294,7 @@ fn dispatch_inner(
     req: &Request,
     control: Option<&Control>,
 ) -> DResult<Value> {
-    // 协议版本：客户端显式带了就必须一致。不带也可以（老的 CLI 请求），
-    // 但带错版本绝不放行——两端对不上时继续跑只会产生难以解释的结果。
-    if let Some(client) = req.params.get("protocol").and_then(Value::as_u64) {
-        if client != PROTOCOL_VERSION as u64 {
-            return Err(DispatchError::new(
-                errcode::PROTOCOL_MISMATCH,
-                format!(
-                    "协议版本不兼容：客户端 v{client}，后端 v{PROTOCOL_VERSION}。请让两端使用同一个版本"
-                ),
-            ));
-        }
-    }
+    proto_check(&req.params)?;
 
     match req.method.as_str() {
         method::PING => Ok(json!({
@@ -150,18 +315,44 @@ fn dispatch_inner(
             "protocol": PROTOCOL_VERSION,
             "models": "ppocrv4",
             "mode": "cpu",
+            // 前端用它校验"连着的到底是不是我该连的后端"：
+            // 进程名相同但数据目录不同（另一个用户、另一份便携版）的实例，
+            // 连上去写库才是灾难。pid 只用于日志与诊断。
+            "pid": std::process::id(),
+            "dataDir": state.data_dir(),
+            "connections": state.connections(),
             // The recogniser is treated as a pluggable unit so the UI can
             // report exactly which engine produced a given result, and so
             // alternative engines can be registered later without a UI change.
             "engine": engine_plugin_json(state),
         })),
         method::RECOGNIZE => recognize(state, &req.params, control),
+        method::RECOGNIZE_START => Err(DispatchError::new(
+            errcode::INTERNAL,
+            "recognize.start 应该在连接线程之外处理",
+        )),
+        method::TASKS_GET => tasks_get(state, &req.params),
         method::RECOGNIZE_SAVE => recognize_save(state, &req.params),
         method::TASKS_LIST => tasks_list(state, &req.params),
         method::TASKS_CANCEL => {
             let id = req_string(&req.params, "id")?;
-            let cancelled = state.tasks.cancel(&id);
-            Ok(json!({ "cancelled": cancelled, "id": id }))
+            // 取消是"提出请求"，不是"已经停下"：worker 只能在下一张图的边界
+            // 收手，所以这里回 cancelling，前端继续轮询 tasks.get 直到终态。
+            match state.tasks.cancel(&id) {
+                CancelOutcome::Requested => {
+                    Ok(json!({ "cancelled": true, "id": id, "state": "cancelling" }))
+                }
+                CancelOutcome::AlreadyDone(st) => Ok(json!({
+                    "cancelled": false,
+                    "id": id,
+                    "state": st.as_str(),
+                    "reason": "alreadyDone",
+                })),
+                CancelOutcome::NotFound => Err(DispatchError::new(
+                    errcode::TASK_NOT_FOUND,
+                    format!("找不到任务 {id}"),
+                )),
+            }
         }
         method::PENDING_LIST => pending_list(state, &req.params),
         method::PENDING_ASSIGN => pending_assign(state, &req.params),
@@ -711,7 +902,9 @@ mod tests {
     fn protocol_mismatch_is_rejected_before_any_work() {
         let err = proto_gate(PROTOCOL_VERSION as u64 + 1).unwrap_err();
         assert_eq!(err.code, errcode::PROTOCOL_MISMATCH);
-        assert!(err.message.contains("v1"), "{}", err.message);
+        // 消息里必须带上双方版本，否则用户只看到"不兼容"没法排查。
+        let expected = format!("v{PROTOCOL_VERSION}");
+        assert!(err.message.contains(&expected), "{}", err.message);
         assert!(proto_gate(PROTOCOL_VERSION as u64).is_ok());
         assert!(proto_gate_no_param().is_ok(), "不带 protocol 的旧请求仍然放行");
     }
@@ -753,6 +946,135 @@ mod tests {
 
     fn limits() -> crate::limits::Limits {
         crate::limits::Limits::default()
+    }
+
+    // ------------------------------------------------------------------
+    // 异步任务协议（0.16）：start 立刻返回、状态可轮询、取消能被读到
+    // ------------------------------------------------------------------
+
+    fn call(state: &Arc<AppState>, method: &str, params: Value) -> Response {
+        dispatch(state, &Request { id: 1, method: method.to_string(), params })
+    }
+
+    fn wait_terminal(state: &Arc<AppState>, id: &str) -> String {
+        for _ in 0..200 {
+            // consume=false：轮询不能把结果取走，那是 `tasks.get` 的正式语义，
+            // 前端拿到终态那一帧才取。
+            let resp = call(state, method::TASKS_GET, json!({ "id": id, "consume": false }));
+            assert!(resp.ok, "tasks.get 失败：{:?}", resp.error);
+            let s = resp.result.unwrap()["state"].as_str().unwrap().to_string();
+            if s != "pending" && s != "running" && s != "cancelling" {
+                return s;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("任务 2 秒内没有进入终态，状态机卡住了");
+    }
+
+    /// 这是本次改动的核心证据：`recognize.start` 必须在 OCR 跑完**之前**就返回
+    /// taskId，否则前端拿不到 id，取消请求也就无从谈起。
+    #[test]
+    fn recognize_start_returns_a_task_id_before_the_work_finishes() {
+        let state = test_state();
+        let started = std::time::Instant::now();
+        let resp = call(&state, method::RECOGNIZE_START, json!({ "images": [] }));
+        let elapsed = started.elapsed();
+
+        assert!(resp.ok, "{:?}", resp.error);
+        let payload = resp.result.unwrap();
+        let id = payload["taskId"].as_str().expect("必须有 taskId").to_string();
+        assert_eq!(payload["state"], "pending");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "start 不该等识别跑完（用了 {elapsed:?}）"
+        );
+
+        // 工作线程随后跑完（这里没有模型，必然 failed），状态必须收敛。
+        let terminal = wait_terminal(&state, &id);
+        assert!(
+            terminal == "failed" || terminal == "completed",
+            "终态应该是 failed/completed，实际 {terminal}"
+        );
+    }
+
+    #[test]
+    fn tasks_get_reports_unknown_ids_explicitly() {
+        let state = test_state();
+        let resp = call(&state, method::TASKS_GET, json!({ "id": "t-does-not-exist" }));
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, errcode::TASK_NOT_FOUND);
+    }
+
+    /// 结果只交一次：避免前端重试时把同一份识别结果贴两遍。
+    #[test]
+    fn result_is_only_delivered_once() {
+        let state = test_state();
+        let resp = call(&state, method::RECOGNIZE_START, json!({ "images": [] }));
+        let id = resp.result.unwrap()["taskId"].as_str().unwrap().to_string();
+        wait_terminal(&state, &id);
+
+        let first = call(&state, method::TASKS_GET, json!({ "id": id }));
+        assert!(first.ok);
+        let second = call(&state, method::TASKS_GET, json!({ "id": id }));
+        assert!(second.ok);
+        assert_eq!(second.result.unwrap()["state"], "failed");
+        // 第一帧带了 error/result，第二帧只剩状态。
+        let first_obj = first.result.unwrap();
+        assert!(first_obj.get("error").is_some() || first_obj.get("result").is_some());
+    }
+
+    /// 第二个 start 在第一个还没结束时被拒绝：OCR 会话是独占的，
+    /// 排队只会让"还要等多久"不可预测。
+    #[test]
+    fn concurrent_recognitions_are_rejected_not_queued() {
+        let state = test_state();
+        let a = call(&state, method::RECOGNIZE_START, json!({ "images": [] }));
+        assert!(a.ok);
+        let b = call(&state, method::RECOGNIZE_START, json!({ "images": [] }));
+        // 第一个可能已经秒完（没有模型），所以"被拒"不是必然结果；
+        // 但只要被拒，错误码必须是 taskBusy。
+        if !b.ok {
+            assert_eq!(b.error.unwrap().code, errcode::TASK_BUSY);
+        }
+
+        let id = a.result.unwrap()["taskId"].as_str().unwrap().to_string();
+        wait_terminal(&state, &id);
+    }
+
+    /// 关停请求必须尊重"还有别的客户端"：两个窗口共用一个后端时，
+    /// 关掉其中一个不能把另一个的后端也带走。
+    #[test]
+    fn shutdown_is_refused_while_another_client_is_connected() {
+        let state = test_state();
+        state.connection_opened();
+        state.connection_opened();
+
+        let refused = call(&state, method::SYSTEM_SHUTDOWN, json!({}));
+        assert!(refused.ok);
+        let payload = refused.result.unwrap();
+        assert_eq!(payload["shuttingDown"], false);
+        assert_eq!(payload["clients"], 2);
+        assert!(!state.shutdown_requested(), "拒绝关停时不能置位");
+
+        state.connection_closed();
+        state.connection_closed();
+        let accepted = call(&state, method::SYSTEM_SHUTDOWN, json!({}));
+        assert!(accepted.ok);
+        assert_eq!(accepted.result.unwrap()["shuttingDown"], true);
+        assert!(state.shutdown_requested());
+    }
+
+    /// `version` 要带 pid 与 dataDir：前端靠这两个字段判断"连着的到底是谁"，
+    /// 而不是靠进程名猜。
+    #[test]
+    fn version_identifies_the_instance() {
+        let state = test_state();
+        let resp = call(&state, method::VERSION, json!({}));
+        assert!(resp.ok);
+        let v = resp.result.unwrap();
+        assert_eq!(v["protocol"], PROTOCOL_VERSION);
+        assert!(v["pid"].as_u64().unwrap() > 0);
+        assert_eq!(v["dataDir"].as_str().unwrap(), state.data_dir());
     }
 
     fn shot(w: u32, h: u32) -> Value {
@@ -823,13 +1145,11 @@ mod tests {
     #[test]
     fn tasks_cancel_reports_unknown_ids() {
         let state = test_state();
-        let req = Request {
-            id: 1,
-            method: method::TASKS_CANCEL.into(),
-            params: json!({ "id": "nope" }),
-        };
-        let out = dispatch_inner(&state, &req, None).unwrap();
-        assert_eq!(out["cancelled"], false);
+        // 0.16 起取消未知任务返回 taskNotFound，而不是含糊的 cancelled:false——
+        // 前端据此能区分"任务结束了"和"这个 id 根本不是我的"。
+        let resp = call(&state, method::TASKS_CANCEL, json!({ "id": "nope" }));
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, errcode::TASK_NOT_FOUND);
     }
 
     #[test]
