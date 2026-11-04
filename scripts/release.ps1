@@ -187,13 +187,17 @@ $remoteTag = & git ls-remote --tags origin "refs/tags/$Tag" 2>$null
 if ($remoteTag) {
     Write-Host "  远端已有 $Tag，跳过推送" -ForegroundColor DarkGray
 } else {
-    # git 把进度写到 stderr；在 $ErrorActionPreference='Stop' 下会被当成错误记录抛出去
-    # （上一次就是把"推送成功"报成了失败）。这里临时放宽，只认退出码。
-    $prevEap = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $pushOut = (& git push origin $Tag 2>&1) -join "`n"
+    # git 把进度写到 stderr；在 $ErrorActionPreference='Stop' 下会被当成错误记录抛出去，
+    # 管道 `2>&1` 又会把输出搅成空串。所以直接重定向到临时文件再读，
+    # 失败时至少能看到真实原因（凭据提示 / 网络 / hook 拒绝）。
+    $pushLog = [System.IO.Path]::GetTempFileName()
+    $env:GIT_TERMINAL_PROMPT = '0'
+    & git push origin $Tag *> $pushLog
     $pushCode = $LASTEXITCODE
-    $ErrorActionPreference = $prevEap
+    $pushOut = if (Test-Path -LiteralPath $pushLog) {
+        [System.IO.File]::ReadAllText($pushLog, [System.Text.UTF8Encoding]::new($false))
+    } else { '' }
+    Remove-Item -LiteralPath $pushLog -Force -ErrorAction SilentlyContinue
 
     if ($pushCode -ne 0) {
         # 再问一次远端：可能已经推上去了，只是本地退出码被 stderr 搅成了非 0
