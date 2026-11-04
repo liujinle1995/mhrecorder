@@ -103,6 +103,9 @@ public sealed class BackendService
             remote = null;
         }
 
+        // 横幅上的"重试"也要能把后端拉起来，而不只是再戳一次空气。
+        remote ??= BackendLauncher.ConnectOrStart(waitMs: 5000);
+
         if (remote is null)
         {
             AppLog.Write("BackendService: reconnect found no backend");
@@ -133,24 +136,34 @@ public sealed class BackendService
         }
 #endif
 
+        // 先直连（启动器已经把后端拉好了的情况，绝大多数）；连不上再自己拉起
+        // 同目录的 mhservice.exe——从开始菜单 / 桌面快捷方式直接启动时没有启动器。
+        RemoteAppService? remote = null;
         try
         {
-            var remote = RemoteAppService.TryCreate();
-            if (remote is not null)
-            {
-                AppLog.Write("BackendService: connected to mhrecorder.v1 backend");
-                return (remote, BackendState.Ready, null);
-            }
+            remote = RemoteAppService.TryCreate();
         }
         catch (Exception ex)
         {
             AppLog.Write($"BackendService: remote connect failed: {ex.Message}");
         }
 
-        const string reason =
+        remote ??= BackendLauncher.ConnectOrStart();
+
+        if (remote is not null)
+        {
+            AppLog.Write("BackendService: connected to mhrecorder.v1 backend");
+            return (remote, BackendState.Ready, null);
+        }
+
+        var detail = BackendLauncher.LastError
+            ?? "mhservice.exe 不存在或没有应答。";
+
+        var reason =
             "没有连上本地识别引擎（mhservice.exe 的命名管道 mhrecorder.v1 无响应）。"
-            + "识别、保存、导出都不可用。请关闭本程序后重新双击启动器；若仍失败，"
-            + "请查看 %LOCALAPPDATA%\\MhRecorder\\mhservice.log。";
+            + "识别、保存、导出都不可用。" + detail
+            + " 程序尝试过自动启动同目录的 mhservice.exe；若仍失败，请查看 "
+            + "%LOCALAPPDATA%\\MhRecorder\\mhservice.log。";
 
 #if DEBUG
         AppLog.Write("BackendService: no backend, falling back to demo data (debug build)");

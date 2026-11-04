@@ -5,6 +5,7 @@
 #  产物命名统一为「项目名 + 版本号」（版本号取自 Protocol.cs 的 AppVersion）：
 #      MhRecorder-0.9.9.exe               单文件便携版（双击即用，推荐分发）
 #      MhRecorder-0.9.9-win-x64.zip       免安装目录版（dist\MhRecorder 打包）
+#      MhRecorder-0.9.9-setup.exe         标准安装包（Inno Setup，按用户安装）
 #      MhRecorder-0.9.9-SHA256SUMS.txt    校验和
 #
 #  dist/ 本身不进仓库（见 .gitignore），binary 只走 Releases，仓库保持纯源码。
@@ -23,6 +24,7 @@
 param(
     [string]$Tag,
     [switch]$SkipBuild,
+    [switch]$SkipInstaller,
     [switch]$Draft,
     [switch]$Prerelease,
     [string]$Notes,
@@ -40,6 +42,7 @@ if ($Repo -notmatch '/') { throw "-Repo 需要 owner/name 形式" }
 $dist = Join-Path $root 'dist'
 $exePath = Join-Path $dist $SingleExeName
 $zipPath = Join-Path $dist $PortableZipName
+$setupPath = Join-Path $dist $InstallerName
 $sumPath = Join-Path $dist $ChecksumName
 $appDir = Join-Path $dist 'MhRecorder'
 
@@ -123,15 +126,28 @@ if (-not (Test-Path -LiteralPath $zipPath)) {
         $true)
 }
 
+# 安装包：Inno Setup 编译，产物只有几十 MB 增长，但用户最认"下一步下一步装完"。
+if (-not $SkipInstaller) {
+    if (-not (Test-Path -LiteralPath $setupPath)) {
+        Write-Host '  dist 里没有安装包，先编译...' -ForegroundColor DarkYellow
+        & (Join-Path $PSScriptRoot 'package_installer.ps1')
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host '  安装包编译失败：本次发布将不含 setup.exe' -ForegroundColor Yellow
+        }
+    }
+}
+
 # 校验和：给下载的人一个核对手段
 $lines = @()
-foreach ($f in @($exePath, $zipPath)) {
+$checksumTargets = @($exePath, $zipPath)
+if (Test-Path -LiteralPath $setupPath) { $checksumTargets += $setupPath }
+foreach ($f in $checksumTargets) {
     $h = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLowerInvariant()
     $lines += "$h  $([System.IO.Path]::GetFileName($f))"
 }
 Set-Content -LiteralPath $sumPath -Value ($lines -join "`n") -Encoding ascii
 
-foreach ($f in @($exePath, $zipPath, $sumPath)) {
+foreach ($f in ($checksumTargets + $sumPath)) {
     Write-Host ("  {0,-40} {1,8:N1} MB" -f [System.IO.Path]::GetFileName($f), ((Get-Item $f).Length / 1MB))
 }
 
@@ -199,6 +215,9 @@ $want = @(
     [pscustomobject]@{ File = $zipPath; Asset = $PortableZipName },
     [pscustomobject]@{ File = $sumPath; Asset = $ChecksumName }
 )
+if (Test-Path -LiteralPath $setupPath) {
+    $want = @($want[0], [pscustomobject]@{ File = $setupPath; Asset = $InstallerName }) + $want[1..2]
+}
 
 foreach ($item in $want) {
     $sizeMb = (Get-Item -LiteralPath $item.File).Length / 1MB
@@ -234,4 +253,5 @@ foreach ($item in $want) {
 Write-Section '完成'
 Write-Host "Release : $($rel.html_url)" -ForegroundColor Green
 Write-Host "单文件  : $SingleExeName" -ForegroundColor Gray
+Write-Host "安装包  : $InstallerName" -ForegroundColor Gray
 Write-Host "免安装  : $PortableZipName" -ForegroundColor Gray

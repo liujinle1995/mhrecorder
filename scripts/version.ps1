@@ -27,4 +27,5 @@ $AppVersion = $m.Matches[0].Groups[1].Value
 # 发布产物统一命名：项目名 + 版本号
 $SingleExeName = "$ProjectName-$AppVersion.exe"
 $PortableZipName = "$ProjectName-$AppVersion-win-x64.zip"
+$InstallerName = "$ProjectName-$AppVersion-setup.exe"
 $ChecksumName = "$ProjectName-$AppVersion-SHA256SUMS.txt"

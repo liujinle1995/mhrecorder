@@ -21,6 +21,9 @@ target/
 # ---- 构建产物：只走 GitHub Releases（scripts\release.ps1），不入库 ----
 /dist/
 
+# ---- 本地打包工具与验证产物（Inno Setup 解压目录、验收截图等） ----
+/build/
+
 # ---- 系统 / 编辑器 ----
 Thumbs.db
 desktop.ini

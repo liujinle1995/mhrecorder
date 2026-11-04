@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Media;
 using MhRecorder.App.Services;
 using MhRecorder.App.Views;
 using MhRecorder.Core.Infrastructure;
+using MhRecorder.Core.Services;
 using MhRecorder.Core.ViewModels;
 using Windows.Graphics;
 using Windows.UI;
@@ -91,7 +92,15 @@ public sealed partial class MainWindow : Window
         NavigateFrame(AppPage.Import);
         ApplyNavState();
 
-        AppWindow.Closing += (_, _) => App.Log("MainWindow closing");
+        AppWindow.Closing += (_, _) =>
+        {
+            App.Log("MainWindow closing");
+
+            // 后端如果是界面自己拉起来的（开始菜单 / 双击 exe 的常规路径），
+            // 退出时一并关掉：不给用户留一个占着两个 DLL 和 500MB 内存的空转进程。
+            // 由 run.ps1 或终端手动启动的不动。
+            BackendLauncher.StopSpawned();
+        };
     }
 
     /// <summary>

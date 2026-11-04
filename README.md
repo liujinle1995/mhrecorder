@@ -76,13 +76,20 @@ mhrecorder/
 ├─ scripts/
 │  ├─ env.ps1              构建环境（cargo 前必须 source）
 │  ├─ make_samples.py      生成合成测试截图
+│  ├─ make_icon.ps1        生成安装包图标（packaging/mhrecorder.ico）
 │  ├─ test_pipe_e2e.ps1    管道端到端测试
 │  ├─ verify_vision.ps1    OCR / 特征回归测试
 │  ├─ verify_real_captures.ps1  真机截图验收（33 项，数值逐项对照真图）
-│  └─ package.ps1          打包 dist/（免安装目录版）
-│  └─ package_single.ps1   打包单文件 exe（自解压，推荐分发方式）
+│  ├─ package.ps1          打包 dist/（免安装目录版）
+│  ├─ package_single.ps1   打包单文件 exe（自解压）
+│  ├─ package_installer.ps1 用 Inno Setup 打标准安装包（setup.exe）
 │  ├─ version.ps1          版本号与产物命名的唯一来源（读 Protocol.cs）
 │  └─ release.ps1          把 dist 产物发布到 GitHub Releases
+├─ packaging/
+│  ├─ mhrecorder.iss       Inno Setup 安装脚本（向导 / 快捷方式 / 卸载）
+│  ├─ ChineseSimplified.isl 安装向导的简体中文语言文件
+│  ├─ mhrecorder.ico       安装包与快捷方式图标
+│  └─ 使用说明.txt          安装版随包的说明（装完自动打开）
 ├─ samples/                合成测试截图
 ├─ docs/ARCHITECTURE.md    详细架构与协议说明
 └─ design/                 设计稿导出的页面图
@@ -112,10 +119,11 @@ cd ..
 
 ## 界面行为（与设计稿对齐）
 
-窗口固定为设计稿尺寸 **1328×888 逻辑单位**（比例 1.495，取自 `design/page_01.png`
-实测 2766×1850 px @2.0836 px/pt），并按显示器 DPI 换算成物理像素。
-**禁止最大化**、**禁止拖拽缩放**（`IsResizable=false` + `IsMaximizable=false`），
-因为界面尚未做响应式适配，放大后布局会错乱。
+窗口默认按设计稿尺寸 **1328×888 逻辑单位**打开（比例 1.495，取自
+`design/page_01.png` 实测 2766×1850 px @2.0836 px/pt），并按显示器 DPI 换算成物理像素。
+允许拖拽缩放与最大化：宽度跨过断点时侧边栏在 254 / 76 两档之间切换
+（窄屏收成图标条），内容区随之重排；小屏与高 DPI 下按工作区可用尺寸收敛，
+不会把窗口开到屏幕外。
 
 角色管理卡片的排布规则：
 
@@ -295,15 +303,36 @@ checkpoint 的事务。
 .\scripts\release.ps1 -Prerelease        # 标记预发布
 ```
 
-上传三个文件，命名统一为「项目名 + 版本号」：
+上传四个文件，命名统一为「项目名 + 版本号」：
 
 | 资产 | 说明 |
 |---|---|
-| `MhRecorder-0.13.0.exe` | 单文件便携版，双击即用（推荐） |
-| `MhRecorder-0.13.0-win-x64.zip` | 免安装目录版（`dist\MhRecorder` 整包） |
-| `MhRecorder-0.13.0-SHA256SUMS.txt` | 两个产物的 SHA-256，供下载后核对 |
+| `MhRecorder-<ver>-setup.exe` | **标准安装包**（Inno Setup）：安装向导 + 开始菜单 + 可选桌面快捷方式 + 卸载入口 |
+| `MhRecorder-<ver>.exe` | 单文件便携版，双击即用（不写注册表） |
+| `MhRecorder-<ver>-win-x64.zip` | 免安装目录版（`dist\MhRecorder` 整包） |
+| `MhRecorder-<ver>-SHA256SUMS.txt` | 三个产物的 SHA-256，供下载后核对 |
 
 Release 正文自动从 `Changelog.cs` 里抽取当前版本的条目，不用手写更新日志。
+
+### 安装包（Inno Setup）
+
+```powershell
+.\scripts\package_installer.ps1        # 编译 dist\MhRecorder-<ver>-setup.exe
+```
+
+| 项 | 值 |
+|---|---|
+| 安装位置 | `%LOCALAPPDATA%\Programs\MhRecorder`（按用户，**不弹 UAC**） |
+| 需要管理员 | 否（命令行给 `/ALLUSERS` 才转全机安装） |
+| 快捷方式 | 开始菜单必建；桌面为可选任务，默认不勾 |
+| 卸载 | 设置 → 应用，或开始菜单「卸载 MhRecorder」 |
+| 卸载时数据 | 默认保留 `%LOCALAPPDATA%\MhRecorder`；勾选后才删 |
+| 覆盖安装 | 自动结束正在运行的界面与后端（Restart Manager + taskkill） |
+| 语言 | 简体中文向导（`packaging/ChineseSimplified.isl`） |
+| 代码签名 | **无**，首次运行会触发 SmartScreen「更多信息 → 仍要运行」 |
+
+编译器需要 Inno Setup 6（`winget install --id JRSoftware.InnoSetup -e`），
+脚本按 `INNO_SETUP_HOME` → `build\tools\InnoSetup6` → Program Files 顺序查找 ISCC.exe。
 
 ### 为什么是"自解压单文件"而不是静态单文件
 
