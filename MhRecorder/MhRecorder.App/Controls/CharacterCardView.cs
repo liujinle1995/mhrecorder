@@ -1,4 +1,7 @@
+using System.Numerics;
 using Microsoft.UI;
+using Microsoft.UI.Composition;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -16,9 +19,10 @@ namespace MhRecorder.App.Controls;
 /// <summary>
 /// 角色管理页上的一张卡片。
 ///
-/// 这张卡片原来是把 200 行"new TextBlock / new Border"堆在页面的 BuildCard 里，
-/// 和轮播动画、搜索、删除混在同一个文件。卡片本身只是"把 CharacterCardViewModel
-/// 画出来"——它不认识轮播，也不认识后端，所以单独一个控件。
+/// 只有一种结构：头像、昵称、等级、气血/魔法、战斗属性、货币、删除按钮。
+/// 中心位与侧位**不再**是两种不同的卡片——差异只体现在
+/// <see cref="SetVisualState"/> 写进去的 Scale / Rotation / CenterPoint(含 Z) / Opacity 上。
+/// 这样轮播时一张卡片可以从侧位走到中心位再走回去，全程不重建、头像只解码一次。
 /// </summary>
 public sealed class CharacterCardView : UserControl
 {
@@ -31,11 +35,24 @@ public sealed class CharacterCardView : UserControl
     private static readonly SolidColorBrush ChipBackground = new(Color.FromArgb(255, 0xF2, 0xF3, 0xF5));
     private static readonly SolidColorBrush AvatarTileBackground = new(Color.FromArgb(255, 0xE9, 0xED, 0xF6));
 
+    /// <summary>内容设计高度，量不到时用它兜底（316 宽卡片约 424）。</summary>
+    private const double FallbackHeight = 424;
+
+    /// <summary>阴影渐变带的高度：一半藏在卡片后面，一半露出来做投影。</summary>
+    private const double ShadowBandHeight = 44;
+
+    private readonly Border _frame;
+    private readonly Border _shadowPlate;
+    private bool _avatarStarted;
+    private Visual? _visual;
+    private Visual? _shadowVisual;
+
     /// <summary>Raised when the user clicks 删除 on this card.</summary>
     public event EventHandler<CharacterCardViewModel>? DeleteRequested;
 
-    public CharacterCardView(CharacterCardViewModel vm, bool isCenter, double width)
+    public CharacterCardView(CharacterCardViewModel vm, double width)
     {
+        ViewModel = vm;
         Width = width;
 
         // WinUI's Border is sealed, so the card is a UserControl wrapping one.
@@ -46,28 +63,97 @@ public sealed class CharacterCardView : UserControl
             BorderBrush = Theme.Resource("CardBorderBrush", new SolidColorBrush(Color.FromArgb(255, 0xE5, 0xE6, 0xEB))),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(14),
-            // Generous vertical rhythm: the mock's card is ~424px tall at 316px wide.
-            Padding = new Thickness(18, isCenter ? 18 : 16, 18, isCenter ? 16 : 14),
-            Child = BuildContent(vm, isCenter, width),
+            Padding = new Thickness(18, 18, 18, 16),
+            Child = BuildContent(vm),
+        };
+        _frame = frame;
+
+        // 阴影板：一条贴在卡片下沿、比卡片窄一点的渐变带。上半截被卡片盖住，
+        // 露在下面的那一截（最强处正好贴着卡片边缘，向下 22px 渐隐）就是投影。
+        // 它是卡片内容的一部分，随卡片一起缩放/旋转；浓度由
+        // CardVisualState.ShadowStrength 驱动，切换时与位移同步过渡。
+        _shadowPlate = new Border
+        {
+            Height = ShadowBandHeight,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(12, 0, 12, -(ShadowBandHeight / 2)),
+            CornerRadius = new CornerRadius(ShadowBandHeight / 2),
+            Background = new LinearGradientBrush
+            {
+                StartPoint = new Windows.Foundation.Point(0.5, 0),
+                EndPoint = new Windows.Foundation.Point(0.5, 1),
+                GradientStops =
+                {
+                    new GradientStop { Color = Color.FromArgb(0, 0, 0, 0), Offset = 0.0 },
+                    new GradientStop { Color = Color.FromArgb(58, 0, 0, 0), Offset = 0.5 },
+                    new GradientStop { Color = Color.FromArgb(0, 0, 0, 0), Offset = 1.0 },
+                },
+            },
+            Opacity = CoverFlow.SideShadowStrength,
         };
 
-        if (isCenter)
-        {
-            try
-            {
-                frame.Translation = new System.Numerics.Vector3(0, 0, 32);
-                frame.Shadow = new ThemeShadow();
-            }
-            catch (Exception ex)
-            {
-                App.Log($"ThemeShadow unavailable: {ex.Message}");
-            }
-        }
+        var root = new Grid();
+        root.Children.Add(_shadowPlate);
+        root.Children.Add(frame);
+        Content = root;
 
-        Content = frame;
+        // 内容与宽度都确定，所以高度对同宽卡片恒定；页面只需要量一次。
+        // 这里直接量已经装好内容的 Border：进入可视化树之前 ActualHeight 是 0，
+        // 但 DesiredSize 是有效的。
+        _frame.Measure(new Windows.Foundation.Size(width, double.PositiveInfinity));
+        var measured = _frame.DesiredSize.Height;
+        CardHeight = measured > 0 ? measured : FallbackHeight;
+
+        // 注意：**不要**在这里或 SetVisualState 里写 Scale / Rotation / CenterPoint /
+        // Translation 这些依赖属性。WinUI 规定同一个元素的三维变换只能由一方驱动：
+        // 一旦 XAML 侧用了它们，ElementCompositionPreview.GetElementVisual 会直接抛
+        // UnauthorizedAccessException（"currently has the CenterPoint property in use"）。
+        // 本控件的三维属性全部交给下面的 Visual 用 Composition 写。
+
+        AutomationProperties.SetAutomationId(this, $"CharacterCard_{vm.Id}");
+        AutomationProperties.SetName(this, vm.Nickname);
     }
 
-    private UIElement BuildContent(CharacterCardViewModel vm, bool isCenter, double width)
+    public CharacterCardViewModel ViewModel { get; }
+
+    /// <summary>这张卡片在未缩放时的高度（内容自然高度），页面用它算适配比例。</summary>
+    public double CardHeight { get; }
+
+    /// <summary>阴影板的 visual：页面用它做浓度动画（只动 Opacity，不碰三维变换）。</summary>
+    internal Visual ShadowVisual =>
+        _shadowVisual ??= ElementCompositionPreview.GetElementVisual(_shadowPlate);
+
+    /// <summary>
+    /// 这张卡片的合成 visual。**唯一**的三维变换入口：Scale / Rotation /
+    /// RotationAxis / CenterPoint(含 Z) / Opacity 都写在它上面，页面动画也用它。
+    /// 只取一次并缓存——GetElementVisual 对同一元素返回同一个对象。
+    /// </summary>
+    internal Visual Visual => _visual ??= ElementCompositionPreview.GetElementVisual(this);
+
+
+    /// <summary>
+    /// 静态提交一个视觉状态。动画运行时页面用 Composition 直接驱动同一组属性，
+    /// 动画结束后再调回这里——写进去的值和动画最后一帧完全相同，因此没有跳变。
+    /// </summary>
+    /// <param name="state">目标视觉状态。</param>
+    /// <param name="fitScale">高度适配系数（窗口矮的时候整体缩小，1.0 表示不缩）。</param>
+    public void SetVisualState(CardVisualState state, double fitScale)
+    {
+        var scale = (float)(state.Scale * fitScale);
+        var visual = Visual;
+
+        visual.RotationAxis = Vector3.UnitY;
+        // CenterPoint 既是旋转/缩放的支点，又是唯一的 3D 位移通道：
+        // 支点整体平移 d，卡片就平移 d，而旋转仍绕卡片自身中心。
+        visual.CenterPoint = new Vector3((float)(Width / 2.0), (float)(CardHeight / 2.0), state.DepthZ);
+        visual.Scale = new Vector3(scale, scale, 1f);
+        visual.RotationAngleInDegrees = state.RotationYDegrees;
+        visual.Opacity = state.Opacity;
+        _shadowPlate.Opacity = state.ShadowStrength;
+    }
+
+
+    private UIElement BuildContent(CharacterCardViewModel vm)
     {
         var root = new StackPanel { Spacing = 0 };
 
@@ -78,14 +164,14 @@ public sealed class CharacterCardView : UserControl
 
         var avatarTile = new Border
         {
-            Width = isCenter ? 60 : 46,
-            Height = isCenter ? 60 : 46,
-            CornerRadius = new CornerRadius(isCenter ? 30 : 23),
+            Width = 56,
+            Height = 56,
+            CornerRadius = new CornerRadius(28),
             Background = AvatarTileBackground,
         };
 
-        avatarTile.Child = BuildInitial(vm.AvatarInitial, isCenter ? 24 : 18);
-        if (!string.IsNullOrEmpty(vm.AvatarPngBase64)) LoadAvatar(avatarTile, vm, isCenter);
+        avatarTile.Child = BuildInitial(vm.AvatarInitial, 22);
+        if (!string.IsNullOrEmpty(vm.AvatarPngBase64)) LoadAvatar(avatarTile, vm);
 
         Grid.SetColumn(avatarTile, 0);
         identity.Children.Add(avatarTile);
@@ -101,7 +187,7 @@ public sealed class CharacterCardView : UserControl
         nameRow.Children.Add(new TextBlock
         {
             Text = vm.Nickname,
-            FontSize = isCenter ? 17 : 16,
+            FontSize = 17,
             FontWeight = FontWeights.SemiBold,
             FontFamily = Theme.Resource("UiDisplayFontFamily", new FontFamily("Segoe UI Variable Display")),
             VerticalAlignment = VerticalAlignment.Center,
@@ -128,9 +214,9 @@ public sealed class CharacterCardView : UserControl
 
         // ---- HP / MP ----
         root.Children.Add(SectionLabel("气血", 18));
-        root.Children.Add(MakeBar(vm.HpText, true, isCenter ? 24 : 20));
+        root.Children.Add(MakeBar(vm.HpText, true, 24));
         root.Children.Add(SectionLabel("魔法", 14));
-        root.Children.Add(MakeBar(vm.MpText, false, isCenter ? 24 : 20));
+        root.Children.Add(MakeBar(vm.MpText, false, 24));
 
         // ---- combat stats ----
         root.Children.Add(SectionLabel("战斗属性", 18));
@@ -171,6 +257,7 @@ public sealed class CharacterCardView : UserControl
             Style = Theme.Resource<Style>("LinkButtonStyle", null!),
         };
         AutomationProperties.SetAutomationId(deleteButton, $"Delete_{vm.Id}");
+        AutomationProperties.SetName(deleteButton, $"删除 {vm.Nickname}");
         deleteButton.Click += (_, _) => DeleteRequested?.Invoke(this, vm);
 
         var deleteContent = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
@@ -192,7 +279,6 @@ public sealed class CharacterCardView : UserControl
         deleteButton.Content = deleteContent;
         root.Children.Add(deleteButton);
 
-        _ = width;
         return root;
     }
 
@@ -202,9 +288,15 @@ public sealed class CharacterCardView : UserControl
     /// BitmapImage exposes no synchronous byte loader, and blocking on
     /// SetSourceAsync inside the UI thread deadlocks. Decoding into a small
     /// in-memory stream and awaiting SetSourceAsync lets ImageOpened fire.
+    ///
+    /// 每张卡片只解码一次（<see cref="_avatarStarted"/>）：轮播期间卡片被复用，
+    /// 这里不会再被调用。
     /// </summary>
-    private static void LoadAvatar(Border tile, CharacterCardViewModel vm, bool isCenter)
+    private void LoadAvatar(Border tile, CharacterCardViewModel vm)
     {
+        if (_avatarStarted) return;
+        _avatarStarted = true;
+
         try
         {
             var image = new Image { Stretch = Stretch.UniformToFill, Opacity = 0 };
@@ -216,7 +308,7 @@ public sealed class CharacterCardView : UserControl
                 tile.Child = image;
             };
             bitmap.ImageFailed += (_, e) => App.Log($"card avatar decode failed: {e.ErrorMessage}");
-            _ = LoadAvatarAsync(bitmap, vm.AvatarPngBase64!, isCenter ? 24 : 18);
+            _ = LoadAvatarAsync(bitmap, vm.AvatarPngBase64!);
         }
         catch (Exception ex)
         {
@@ -224,7 +316,7 @@ public sealed class CharacterCardView : UserControl
         }
     }
 
-    private static async Task LoadAvatarAsync(BitmapImage target, string base64Png, double fontSize)
+    private static async Task LoadAvatarAsync(BitmapImage target, string base64Png)
     {
         try
         {
@@ -237,7 +329,7 @@ public sealed class CharacterCardView : UserControl
         }
         catch (Exception ex)
         {
-            App.Log($"LoadAvatarAsync failed: {ex.Message} (font {fontSize})");
+            App.Log($"LoadAvatarAsync failed: {ex.Message}");
         }
     }
 

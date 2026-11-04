@@ -77,8 +77,15 @@
                 <Grid.Clip>
                     <RectangleGeometry x:Name="CarouselClip" Rect="0,0,0,0" />
                 </Grid.Clip>
+                <!-- 零尺寸「舞台」：由代码摆在卡片区中心，并给它一个透视矩阵
+                     （TransformMatrix.M34 = -1/d）。卡片都挂在它下面、坐标相对中心，
+                     这样 Y 轴旋转才会呈现近大远小，而不是被压扁成 2%。
+                     用 Canvas 而不是 Grid：Canvas 不约束也不裁剪子元素，
+                     子元素可以摆在舞台边界之外。 -->
                 <Canvas x:Name="CarouselCanvas"
-                        SizeChanged="OnCarouselSizeChanged" />
+                        SizeChanged="OnCarouselSizeChanged">
+                    <Canvas x:Name="Stage" Width="0" Height="0" />
+                </Canvas>
             </Grid>
 
             <!-- pagination -->

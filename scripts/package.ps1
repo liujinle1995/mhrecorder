@@ -44,6 +44,10 @@ $script:DistRoot = Join-Path $script:Root 'dist\MhRecorder'
 $script:Errors   = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
 
+# 随包的 README.txt 里那行版本号以前写死成 0.9.2，每个版本都在发错的信息。
+# 统一从 Protocol.cs 的 AppVersion 取（与产物命名同源）。
+. (Join-Path $PSScriptRoot 'version.ps1')
+
 # --- small helpers ---------------------------------------------------------
 
 function Write-Section {
@@ -418,6 +422,7 @@ onnxruntime.dll（1.17），导致识别引擎启动失败。
 不安装系统服务，不留后台常驻进程（后端在程序退出时一并结束）。
 '@
 
+$readmeContent = $readmeContent.Replace('版本：0.9.2（本地版）', "版本：$AppVersion（本地版）")
 Write-TextFileBom -Path $readmePath -Content ($readmeContent + "`r`n")
 
 if (-not (Test-Path -LiteralPath $runPs1Path))  { Add-Error "生成 run.ps1 失败: $runPs1Path" }

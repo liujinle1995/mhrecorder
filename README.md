@@ -83,6 +83,7 @@ mhrecorder/
 │  ├─ test_two_windows.ps1 两个窗口共用一个后端，互不影响
 │  ├─ test_ui_cancel.ps1   界面级验证「取消」按钮真的会停
 │  ├─ test_ocr_profile.ps1 设置档位 → 引擎就地重建 → 重启后保持（21 项）
+│  ├─ test_coverflow.ps1   界面级轮播验收（正反向 / 连点 / 滚轮 / 搜索 / 删除 / 反复进退）
 │  ├─ verify_vision.ps1    OCR / 特征回归测试
 │  ├─ verify_real_captures.ps1  真机截图验收（37 项，数值逐项对照真图）
 │  ├─ package.ps1          打包 dist/（免安装目录版）
@@ -134,11 +135,55 @@ cd ..
 
 | 角色数 | 行为 |
 |---|---|
+| 0 | 空态提示，不建卡片 |
 | 1–2 | 平铺、水平居中，不显示轮播箭头 |
-| ≥3 | 轮播；**第二张卡片（居中卡片右侧那张）置于 Z 轴上层** |
+| ≥3 | Cover Flow 轮播；**居中卡片位于最上层**，左右两张缩小、后仰、略淡 |
 
 头像：从人物属性截图自动裁切（以游戏ID文本为锚点反推方形框），
 以 base64 PNG 存入数据库的 `avatar_path` 列，卡片与识别结果都显示真实头像。
+
+#### 轮播是怎么跑的（0.18.0 重写）
+
+所有尺寸、时长与视觉目标集中在 `Controls/CoverFlow.cs`；卡片本身只有一种结构
+（`Controls/CharacterCardView.cs` 的 `SetVisualState()`），中心卡与侧卡只改视觉属性，
+不重建控件。动画统一走 WinUI Composition 的 `Visual`，与页面布局解耦：
+
+| 动画属性 | 作用 |
+|---|---|
+| `CenterPoint` | 位移 + 三维深度（同时是旋转 / 缩放的支点） |
+| `Scale` | 中心 1.0 / 侧边 0.88 |
+| `RotationAngleInDegrees`（`RotationAxis = Y`） | 中心 0° / 左右 ±12° |
+| `Opacity` | 中心 1.0 / 侧边 0.82 |
+| 阴影板 `Opacity` | 中心浓、侧边淡，同一批动画里一起过渡 |
+
+`CarouselCanvas` 里有一个零尺寸的 `Stage`，`TransformMatrix.M34 = -1/1600` 提供透视，
+Y 轴旋转才会真的有近大远小；`Canvas.SetZIndex` 管层级。默认单步 420 ms（淡入淡出
+250 ms），Ease Out；`CompositionScopedBatch.Completed` 是动画结束的判定依据，
+1500 ms 计时器只作兜底，**不用固定延时猜动画做完了没有**。
+
+状态机 `Idle → Preparing → Animating → Finalizing → Idle` 保证任何时刻只有一批动画在跑；
+快速连点 / 连滚先入队（上限 12），积压时单步自动压到 240 ms。卡片按角色 Id 缓存复用
+（`Dictionary<string, CardEntry>` + LRU），动画结束只摘除退出画面的那一张，其余原地静态
+提交与最后一帧完全相同的值——这正是"切换不闪"的关键。搜索、删除、窗口尺寸变化会取消
+或重置动画并重算布局；页面卸载时停动画、清队列、退订事件。
+
+> 两个 WinUI 3 / Windows App SDK 1.8 的硬约束：卡片的 `Scale` / `Rotation` /
+> `CenterPoint` 这类 XAML 依赖属性一个都不能写，否则
+> `ElementCompositionPreview.GetElementVisual` 会直接抛 `UnauthorizedAccessException`；
+> `Visual` 上也没有 `Translation` 和 `Shadow`（已对着 winmd 与投影 DLL 核过）。
+> 阴影因此做成卡片内部的渐变带，用它的 `Opacity` 做浓度动画。
+
+界面级验收脚本（`MH_DATA_DIR` 隔离数据目录、UIA 驱动、截图存 `build\coverflow\`）：
+
+```powershell
+.\scripts\test_coverflow.ps1 -Tag 6char -DataDir D:\app\mhrecorder\build\cfdata-6 -Mode sequence
+.\scripts\test_coverflow.ps1 -Tag 2char -DataDir D:\app\mhrecorder\build\cfdata-2 -Mode static
+# -Mode 还支持 delete / search / roundtrip
+```
+
+6 个角色跑 19 步动画只创建了 6 张卡片（等于角色数），可作为"轮播期间零重建"的证据。
+尚未覆盖：拖拽窗框的连续缩放、触屏 / 触控板手势、高 DPI 跨屏、动画中途关闭窗口、
+GPU 弱机上的完成事件兜底分支。
 
 ## 识别引擎 = 插件
 
@@ -330,7 +375,7 @@ checkpoint 的事务。
 .\scripts\package_single.ps1
 ```
 
-产物：**`dist\MhRecorder-<版本号>.exe`**（当前 `MhRecorder-0.13.0.exe`，86 MB，
+产物：**`dist\MhRecorder-<版本号>.exe`**（86 MB 左右，
 双击即用，可以单独发给别人）。版本号取自 `MhRecorder.Core/Protocol.cs` 的
 `AppVersion`，打包脚本自动拼进文件名，不需要手改。
 
@@ -426,7 +471,7 @@ WinUI 3 / Windows App SDK 无法静态打包成一个文件，原因有三：
 校验 / 排查用打包机上的 console 工具，而不是分发出去的 GUI 外壳：
 
 ```powershell
-.\src\target\release\mhpack.exe --verify .\dist\MhRecorder-0.13.0.exe   # 校验内置载荷
+.\src\target\release\mhpack.exe --verify .\dist\MhRecorder-<版本号>.exe   # 校验内置载荷
 .\src\target\release\mhpack.exe --extract-to D:\tmp\app                # 解压到指定目录（排查用）
 ```
 

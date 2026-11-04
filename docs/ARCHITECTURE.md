@@ -70,8 +70,8 @@ OpenCV 4.12 world 已 vendor，ONNX Runtime 1.31.1 已 vendor（`ort` 用 `load-
 
 | method | params | result |
 |---|---|---|
-| `ping` | `{}` | `{"status":"ready","version":"0.17.0","protocol":2}` |
-| `version` | `{}` | `{"backend":"0.17.0","protocol":2,"models":"ppocrv4","pid":1234,"dataDir":"C:\\…\\MhRecorder","connections":1,"ocr":{"profile":"balanced","cores":12,"config":{"det":"db","batchSize":4,"threads":4,"maxSide":1280,"summary":"…"}}}` |
+| `ping` | `{}` | `{"status":"ready","version":"0.18.0","protocol":2}` |
+| `version` | `{}` | `{"backend":"0.18.0","protocol":2,"models":"ppocrv4","pid":1234,"dataDir":"C:\\…\\MhRecorder","connections":1,"ocr":{"profile":"balanced","cores":12,"config":{"det":"db","batchSize":4,"threads":4,"maxSide":1280,"summary":"…"}}}` |
 | `recognize` | `{"images":[{"name":"a.png","data":"<base64>"}]}` | `RecognitionResult`（**同步**，连接被占到底；只给 mhcli / 测试用） |
 | `recognize.start` | `{"images":[…]}` | `{"taskId":"t1-…","state":"pending"}`（**立刻返回**，OCR 在后台线程） |
 | `tasks.get` | `{"id":"…","consume":true}` | `{"id":"…","state":"running","elapsedMs":820,"terminal":false}`；终态时附 `result` 或 `error`，且只给一次 |
@@ -165,7 +165,8 @@ MhRecorder.App/                  只做"画"和"把平台能力接进来"
 ├─ Views/*.xaml(.cs)             绑定 + 手势 + 图表/轮播等视觉计算
 ├─ Views/Dialogs/                ContentDialog 子类（更新记录 / 窗口选择）
 ├─ Controls/ZoomableImageView    可缩放平移的截图 + OCR 框叠层
-├─ Controls/CharacterCardView    角色卡片（UserControl，Border 是 sealed）
+├─ Controls/CoverFlow.cs         轮播的全部参数 + CardVisualState
+├─ Controls/CharacterCardView    单一结构角色卡片 + SetVisualState()
 ├─ Platform/                     WinUI 实现：文件选择器、剪贴板、窗口截图
 └─ Services/AppHost.cs           组合根：唯一 new 服务与 ViewModel 的地方
 ```
@@ -177,6 +178,32 @@ MhRecorder.App/                  只做"画"和"把平台能力接进来"
 2. **ViewModel 不发 UI 通知**：不 new 控件、不弹窗、不碰 `XamlRoot`。
 3. **页面不写业务判断**：能不能保存、改过的值怎么入库、身份不明要不要拦，都在 VM。
 4. 视觉计算（轮播三张卡的位置、柱状图坐标、缩放平移）留在视图，那是"怎么画"。
+5. **轮播的视觉状态只有一份定义**：`Controls/CoverFlow.cs` 里的 `StateForSlot()`。
+   `CharactersPage` 只负责算槽位与编排动画，`CharacterCardView.SetVisualState()` 只负责
+   把这份状态写进 Composition Visual。改参数不要散落到页面里。
+
+### 轮播：状态机与卡片池（0.18.0）
+
+```
+Step(delta) → 入队 → Pump() → Preparing → Animating → Finalizing → Idle → Pump()
+                       ↑                       │
+                       └── 队列里还有步数 ◄────┘
+```
+
+- 唯一权威的完成信号是 `CompositionScopedBatch.Completed`（回调不保证在 UI 线程，
+  一律 `DispatcherQueue.TryEnqueue`）；1500 ms 计时器只在批事件丢失时兜底。
+- `Finalizing` 只 Detach 退出槽位那一张，其余 `CommitStatic()` 写入与最后一帧相同的值；
+  整树重排只发生在 `HardReset()`（数据变化 / 加载完成 / 尺寸变化）。
+- 卡片池按角色 Id 缓存 + LRU 回收；3 张卡成环时 `WrapAround` 复用同一对象，靠
+  "淡出 → 换边 → 淡入"两帧完成绕回，旋转在透明帧翻转。
+- 动画属性：`CenterPoint`（位移 + 深度 + 支点）、`Scale`、`RotationAngleInDegrees`
+  （`RotationAxis = Y`）、`Opacity`，外加阴影板的 `Opacity`。透视由
+  `Stage.TransformMatrix.M34 = -1/1600` 提供，层级由 `Canvas.SetZIndex` 决定。
+- **不要给卡片写 XAML 三维依赖属性**（`Scale` / `Rotation` / `CenterPoint`）：
+  那会让 `ElementCompositionPreview.GetElementVisual` 抛 `UnauthorizedAccessException`。
+  `Visual` 上也没有 `Translation` / `Shadow`（Windows App SDK 1.8 实测）。
+- 搜索 / 删除 / 尺寸变化会取消进行中的动画（先冻结当前视觉值再 `StopAnimation`），
+  页面 `Unloaded` 时清队列、停计时器、退订事件、摘卡片。
 
 ### 后端状态：三种，不许含糊
 
