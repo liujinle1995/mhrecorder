@@ -40,6 +40,18 @@ $ErrorActionPreference = 'Stop'
 # 让 curl 把响应写进文件，再用 UTF-8 读，绕开控制台编码。
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# git 2.x 默认用 protocol v2，服务端响应是二进制 pkt-line 流。这个流一旦被
+# PowerShell 的管道接住（`$x = & git ls-remote ...` 或 `*> file`），会被按文本
+# 逐行重组，pkt-line 的边界就丢了，报 "fatal: expected flush after ref listing"
+# 并以 128 退出。结果是：远端明明已经有这个 tag，脚本却判成"没有"，
+# 接着去推一个已存在的 tag，再把必然失败的退出码当成"推送失败"抛出去。
+# v0 的响应是纯文本，解析稳定，且 push 也仍支持，所以整体降级用 v0。
+if (-not $env:GIT_CONFIG_COUNT) {
+    $env:GIT_CONFIG_COUNT   = '1'
+    $env:GIT_CONFIG_KEY_0   = 'protocol.version'
+    $env:GIT_CONFIG_VALUE_0 = '0'
+}
+
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'version.ps1')
 
