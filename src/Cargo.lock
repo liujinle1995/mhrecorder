@@ -920,7 +920,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mhcli"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "mhcore"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "mhpack"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "zip",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "mhservice"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "mhstore"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "mhvision"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

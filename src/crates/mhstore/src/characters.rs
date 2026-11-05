@@ -573,6 +573,17 @@ fn persist_evidence(
         )?;
     }
 
+    // 人物属性面板不显示 人物评分，所以那一行永远 score = NULL；而「先录属性图、
+    // 再拍包裹图」正是应用推荐的顺序，结果评分这条最硬的辅助证据一次都用不上。
+    // 哪张图看到了评分，就把该角色其它面板的 NULL 补上（不覆盖已有值）。
+    if let Some(score) = result.fingerprints.iter().filter_map(|f| f.score).next() {
+        tx.execute(
+            "UPDATE character_fingerprints SET score = ?2
+              WHERE character_id = ?1 AND score IS NULL",
+            params![character_id, score],
+        )?;
+    }
+
     // 发色 / 武器. Kept apart from the panel thumbnails on purpose: the
     // thumbnails describe a picture that goes stale when the bag's items
     // change, this describes the character and does not.
@@ -584,11 +595,12 @@ fn persist_evidence(
             .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| String::new()));
         tx.execute(
             "INSERT INTO character_appearance
-             (character_id, hair_name, hair_rgb, weapon_name, weapon_rgb, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6)
+             (character_id, hair_name, hair_rgb, method, weapon_name, weapon_rgb, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(character_id) DO UPDATE SET
                  hair_name = excluded.hair_name,
                  hair_rgb = excluded.hair_rgb,
+                 method = excluded.method,
                  weapon_name = COALESCE(excluded.weapon_name, character_appearance.weapon_name),
                  weapon_rgb = COALESCE(excluded.weapon_rgb, character_appearance.weapon_rgb),
                  updated_at = excluded.updated_at",
@@ -596,6 +608,7 @@ fn persist_evidence(
                 character_id,
                 app.hair_name,
                 hair_rgb,
+                app.method as i64,
                 app.weapon_name,
                 weapon_rgb,
                 now

@@ -17,7 +17,7 @@ public static class ProtocolConstants
     /// 一条明确的版本不符提示。
     /// </summary>
     public const int Version = 2;
-    public const string AppVersion = "0.18.0";
+    public const string AppVersion = "0.19.0";
 }
 
 /// <summary>Canonical method names (mirror of `protocol::method`).</summary>

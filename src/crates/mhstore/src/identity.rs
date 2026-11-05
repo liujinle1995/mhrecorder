@@ -35,6 +35,15 @@ impl Store {
                 updated_at
             ],
         )?;
+        // 这张图看到了评分，就把该角色其它面板上那些 NULL 的评分补齐：
+        // 人物属性面板从不显示评分，否则那条指纹永远参与不了比对。
+        if let Some(score) = fingerprint.score {
+            conn.execute(
+                "UPDATE character_fingerprints SET score = ?2
+                  WHERE character_id = ?1 AND score IS NULL",
+                params![character_id, score],
+            )?;
+        }
         Ok(())
     }
 
@@ -49,7 +58,7 @@ impl Store {
         // but no fingerprint yet (or the other way round) is still a candidate.
         let mut stmt = conn.prepare(
             "SELECT c.id, c.nickname, f.screen_kind, f.thumb, f.score,
-                    a.hair_name, a.hair_rgb, a.weapon_name, a.weapon_rgb,
+                    a.hair_name, a.hair_rgb, a.weapon_name, a.weapon_rgb, a.method,
                     c.game_id, c.server, c.level, c.avatar_thumb, c.updated_at
              FROM characters c
              LEFT JOIN character_fingerprints f ON f.character_id = c.id
@@ -67,11 +76,12 @@ impl Store {
                 r.get::<_, Option<String>>(6)?,
                 r.get::<_, Option<String>>(7)?,
                 r.get::<_, Option<String>>(8)?,
-                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<i64>>(9)?,
                 r.get::<_, Option<String>>(10)?,
-                r.get::<_, Option<i64>>(11)?,
-                r.get::<_, Option<String>>(12)?,
-                r.get::<_, i64>(13)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<i64>>(12)?,
+                r.get::<_, Option<String>>(13)?,
+                r.get::<_, i64>(14)?,
             ))
         })?;
 
@@ -79,7 +89,7 @@ impl Store {
         for row in rows {
             let (
                 id, nickname, kind, thumb, score, hair_name, hair_rgb, weapon_name, weapon_rgb,
-                game_id, server, level, avatar_thumb, updated_at,
+                method, game_id, server, level, avatar_thumb, updated_at,
             ) = row?;
             let entry = match refs.iter_mut().find(|r| r.character_id == id) {
                 Some(e) => e,
@@ -112,6 +122,7 @@ impl Store {
                     entry.appearance = Some(AppearanceSignature {
                         hair_name,
                         hair_rgb: parse_rgb(&hair_rgb).unwrap_or([0, 0, 0]),
+                        method: method.unwrap_or(0).clamp(0, 255) as u8,
                         weapon_name,
                         weapon_rgb: weapon_rgb.as_deref().and_then(parse_rgb),
                     });
@@ -142,6 +153,7 @@ impl Store {
                     "characterId": r.character_id,
                     "hairName": a.hair_name,
                     "hairRgb": a.hair_rgb,
+                    "method": a.method,
                     "weaponName": a.weapon_name,
                     "weaponRgb": a.weapon_rgb,
                 }));

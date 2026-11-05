@@ -195,6 +195,15 @@ pub struct AppearanceSignature {
     /// The measured 发色, kept so two captures can be compared by distance
     /// instead of by bucket (adjacent buckets are not different characters).
     pub hair_rgb: [u8; 3],
+    /// Which extractor produced `hair_rgb`.
+    ///
+    /// Two captures can only be compared by RGB distance when both were read
+    /// the same way. 0 is the pre-0.19 extractor (mean of the dark pixels in a
+    /// fixed box measured on one 1265x711 capture); 1 walks the left column to
+    /// find the model and takes the dominant colour cluster there. Rows written
+    /// by 0 stay readable — they just cannot veto or confirm by colour.
+    #[serde(default)]
+    pub method: u8,
     /// 武器高光色 name, when a bright accent was actually found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weapon_name: Option<String>,

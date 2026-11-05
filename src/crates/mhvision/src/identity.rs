@@ -17,11 +17,16 @@ use crate::thumbnail::thumb_similarity;
 /// |---|---|---|
 /// | 面板缩略图 | 0.55 | 强度 ≥ 0.90（≈ 相似度 0.98）时可以 |
 /// | 人物评分   | 0.40 | **不能** —— 随装备/等级变化 |
-/// | 发色/武器  | 0.35 | 强度 ≥ 0.85 时可以 |
+/// | 发色/武器  | 0.35 | 强度 ≥ 0.55 时可以 |
 /// | 头像       | 0.25 | 强度 ≥ 0.95 时可以 |
 /// | 时间上下文 | 0.10 | 不能 |
 ///
 /// 权重之和刻意大于 1：互相印证的信号能越过判定线，孤立信号停在线上。
+///
+/// **没有任何信号能否决候选**。曾经唯一的例外是"发色差得远"，但发色读数
+/// 本身就会因为换染、光线、面板版式而漂移 —— 一次取样偏差把整条证据删掉，
+/// 代价是"先录属性图、再拍包裹图"这个推荐顺序直接失效。现在差得远只是把
+/// 这条证据压到 0，其余证据照常加权。
 #[derive(Debug, Clone)]
 pub struct MatchPolicy {
     pub panel_weight: f64,
@@ -32,12 +37,24 @@ pub struct MatchPolicy {
     /// 低于此相似度的两张缩略图不是同一张图（包裹 vs 人物属性 ≈ 0.48，
     /// 不同角色的同版式面板 ≈ 0.82，同一面板重拍 ≈ 0.98）。
     pub panel_floor: f64,
-    /// 发色距离超过此值视为明显不是同一个人。
+    /// 发色距离超过此值视为"这次的发色读数和记录差太多"，**降低可信度而不是
+    /// 否决**——换染、光线、取样偏差都会造成大距离，而得分有加权兜底。
     pub hair_gate: f64,
     /// 发色距离在此以内算"同一个颜色"，而不是"同一个色系".
     pub hair_close: f64,
+    /// 发色距离 → 强度的曲线指数，`(1 - d/gate)^curve`。
+    ///
+    /// < 1 让近距离更接近 1：同一角色跨面板实测 40~70，线性曲线会把这段
+    /// 压到 0.4 以下，正好卡在"能单独定案"的门槛之外，于是永远是差一点。
+    pub hair_curve: f64,
     /// 武器高光色距离超过此值视为换了武器（阻尼而非否决）。
     pub weapon_gate: f64,
+    /// 两条外观记录由不同的取样算法产生时，发色证据的固定强度。
+    ///
+    /// 旧算法（method 0）的取样框在窗口截图上落在标题栏上，读数本身就是错的，
+    /// 拿它和 method 1 的读数比距离毫无意义；给一个弱但非零的强度，让"这两个
+    /// 角色看着像不像"不至于因为历史数据而永久失效。
+    pub method_mismatch_strength: f64,
     /// 通过所需的最低总分。
     pub min_total: f64,
     /// 与第二名的必备差距，避免"看起来都差不多"时瞎猜。
@@ -61,13 +78,24 @@ impl Default for MatchPolicy {
             avatar_weight: 0.25,
             history_weight: 0.10,
             panel_floor: 0.80,
-            // 同一角色跨面板实测 32，不同角色 45——所以 70 只拦"明显不是一个人"，
-            // 真正的区分交给武器色与加权。
-            hair_gate: 70.0,
+            // 同一角色跨面板实测 32，不同角色 45——70 只拦"明显不是一个人"。
+            // 现在 70 → 90：超过门槛不再一票否决，只是把发色证据压到 0，
+            // 于是"录了属性图再拍包裹图"这种跨面板场景不会因为一次取样偏差全盘失败。
+            hair_gate: 90.0,
             hair_close: 40.0,
+            hair_curve: 0.65,
             // 换武器的代价比换发型小得多，门槛放得比发色宽。
             weapon_gate: 80.0,
-            min_total: 0.45,
+            method_mismatch_strength: 0.30,
+            // 0.45 → 0.27. The old bar assumed three signals would agree, but
+            // a 包裹 capture has no 游戏ID, its panel fingerprint never matches
+            // the 人物属性 one, and 人物属性 shows no 评分 — so the only two
+            // signals left are appearance and history, worth 0.45 combined at
+            // absolute best. 0.27 is what "the look matches reasonably and this
+            // character was captured recently" actually sums to; the
+            // two-agreeing-signals rule and the margin rule still do the real
+            // filtering.
+            min_total: 0.27,
             min_margin: 0.08,
             decisive_panel: 0.90,
             decisive_appearance: 0.55,
@@ -164,6 +192,37 @@ pub(crate) fn score_candidate(
             policy.score_weight,
             format!("人物评分 {score} 一致"),
         ));
+    } else if evidence.is_empty() && !reference.fingerprints.is_empty() {
+        // Nothing else matched. Say which signals could not even be tried, so
+        // the candidate list explains itself instead of showing a bare 0.00.
+        //
+        // 面板指纹按 (角色, 面板类型) 存：一个只录过「人物属性」的角色，拿
+        // 「包裹」截图去比，指纹一条都碰不上；而 人物评分 只在 包裹 上显示。
+        // 这两件事叠在一起就是"看起来什么都没比"，用户完全看不出原因。
+        let kinds: Vec<&str> = reference
+            .fingerprints
+            .iter()
+            .map(|f| panel_label(f.screen))
+            .collect();
+        let mut missing = Vec::new();
+        if !decoded.is_empty() && !decoded.iter().any(|(k, _)| reference.fingerprints.iter().any(|f| f.screen == *k)) {
+            missing.push(format!("只存过{}面板的指纹，本次面板无法比对", kinds.join("、")));
+        }
+        if !current_scores.is_empty() && reference.fingerprints.iter().all(|f| f.score.is_none()) {
+            missing.push(format!(
+                "没有存过评分（{}面板不显示），本次 {} 无法比对",
+                kinds.join("、"),
+                current_scores[0]
+            ));
+        }
+        if !missing.is_empty() {
+            evidence.push(MatchEvidence::new(
+                EvidenceKind::CharacterScore,
+                0.0,
+                0.0,
+                missing.join("；"),
+            ));
+        }
     }
 
     // ---- 3. 发色 / 武器 --------------------------------------------------

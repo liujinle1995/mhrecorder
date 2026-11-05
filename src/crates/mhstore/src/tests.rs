@@ -299,6 +299,7 @@ fn export_document_carries_the_identity_material() {
     r.appearance = Some(mhcore::AppearanceSignature {
         hair_name: "深蓝".into(),
         hair_rgb: [42, 48, 96],
+        method: 1,
         weapon_name: Some("青锋".into()),
         weapon_rgb: Some([120, 200, 170]),
     });

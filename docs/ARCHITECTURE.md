@@ -70,8 +70,8 @@ OpenCV 4.12 world 已 vendor，ONNX Runtime 1.31.1 已 vendor（`ort` 用 `load-
 
 | method | params | result |
 |---|---|---|
-| `ping` | `{}` | `{"status":"ready","version":"0.18.0","protocol":2}` |
-| `version` | `{}` | `{"backend":"0.18.0","protocol":2,"models":"ppocrv4","pid":1234,"dataDir":"C:\\…\\MhRecorder","connections":1,"ocr":{"profile":"balanced","cores":12,"config":{"det":"db","batchSize":4,"threads":4,"maxSide":1280,"summary":"…"}}}` |
+| `ping` | `{}` | `{"status":"ready","version":"0.19.0","protocol":2}` |
+| `version` | `{}` | `{"backend":"0.19.0","protocol":2,"models":"ppocrv4","pid":1234,"dataDir":"C:\\…\\MhRecorder","connections":1,"ocr":{"profile":"balanced","cores":12,"config":{"det":"db","batchSize":4,"threads":4,"maxSide":1280,"summary":"…"}}}` |
 | `recognize` | `{"images":[{"name":"a.png","data":"<base64>"}]}` | `RecognitionResult`（**同步**，连接被占到底；只给 mhcli / 测试用） |
 | `recognize.start` | `{"images":[…]}` | `{"taskId":"t1-…","state":"pending"}`（**立刻返回**，OCR 在后台线程） |
 | `tasks.get` | `{"id":"…","consume":true}` | `{"id":"…","state":"running","elapsedMs":820,"terminal":false}`；终态时附 `result` 或 `error`，且只给一次 |
@@ -255,6 +255,39 @@ let (result, _) = merge_included(&scans, &plan, …);     // 只合并 included
 `batchIdentity` 有 `consistent` / `conflict` / `unidentified` 三种。冲突时前端在
 证据区写明"本次只合并了 1/2 张截图"，并把被排除的图上的框从叠加层里去掉——
 那些数字不属于这条记录。
+
+## 外观特征：怎么从一张面板图上读出"这个人长什么样"
+
+`mhvision::appearance` 是"包裹截图认不出人"时唯一能跨面板使用的线索，所以它的取样
+必须和面板框的位置脱钩——`locate_panel` 在窗口截图上会把约 150px 游戏背景一起框进来，
+任何写死的相对坐标都会跟着漂。
+
+```rust
+// 1. 角色立绘在哪：左栏里成块的"墨"（深色或高饱和），取最长的一段，
+//    再向上跨 ≤6% 的小缺口合并 —— 黑发角色的小脑袋因此能和她的袍子连成一块。
+let (top, bottom) = character_band(img, kind)?;
+
+// 2. 头在哪：相对这块的顶部，比例按面板分（人物属性有立绘框，包裹没有）。
+let (top_frac, height_frac) = head_window(kind);
+let head = … // 左栏 x 由 column_zone(kind) 给出
+
+// 3. 发色：先取高饱和簇（金发/银发/粉发），不够数再取深色均值（墨黑/深蓝）。
+```
+
+三条约束，每一条都对应过一次真实的判错：
+
+1. **扫描从画面 18% 处开始**。窗口截图顶部的游戏背景（雪山）又暗又饱和，会形成比角色
+   更长的"墨块"，把取样窗口带到天上去。
+2. **x 范围按面板类型分开**。包裹面板的装备槽在 x 0.10~0.22，全是高饱和图标；窗口一旦
+   盖到那里，每个包裹都会读出"发色 蓝"（头盔）或"发色 金"（披风）。
+3. **取样窗口不能太高**。人物属性面板的袍子紧接在头发下面，窗口伸进袍子就把金色和红色
+   平均成一片，同一角色跨面板能差出 60+。
+
+`AppearanceSignature.method` 记录这条记录是哪一版取样器写的。两版读数不能比 RGB 距离，
+所以 `appearance_strength` 在版本不同时只给固定的弱强度并注明原因，而不是硬算距离。
+
+`AppearanceSignature` 里除了 `hair_rgb` 还留了 `weapon_rgb`（青碧高光）。换武器比换发色
+常见得多，所以武器不同只是阻尼（×0.3），不否决。
 
 ## 身份安全：两道闸门
 

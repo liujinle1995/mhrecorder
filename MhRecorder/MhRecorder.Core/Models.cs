@@ -337,6 +337,14 @@ public sealed class AppearanceSignature
     /// <summary>The measured 发色; comparison uses this, not the name.</summary>
     public int[] HairRgb { get; set; } = Array.Empty<int>();
 
+    /// <summary>
+    /// Which extractor produced <see cref="HairRgb"/>.
+    /// 0 = the old fixed-box sampler, 1 = the model-column sampler.
+    /// Two signatures taken different ways can't be compared by colour, so this
+    /// has to survive the round trip through the UI untouched.
+    /// </summary>
+    public int Method { get; set; }
+
     /// <summary>武器高光色 name, when a glow was actually found.</summary>
     public string? WeaponName { get; set; }
 

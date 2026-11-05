@@ -64,6 +64,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/006_pending_recognitions.sql"),
         fixup: None,
     },
+    Migration {
+        version: 7,
+        name: "appearance_method",
+        sql: include_str!("../migrations/007_appearance_method.sql"),
+        // 更早的开发构建里可能已经手工加过这一列。
+        fixup: Some(add_appearance_method),
+    },
 ];
 
 /// 代码认识的最新版本。
@@ -146,7 +153,7 @@ fn verify(conn: &Connection) -> Result<()> {
         ("settings", &["key", "value"]),
         ("image_features", &["cache_key", "payload"]),
         ("character_fingerprints", &["character_id", "screen_kind", "thumb"]),
-        ("character_appearance", &["character_id", "hair_rgb"]),
+        ("character_appearance", &["character_id", "hair_rgb", "method"]),
         ("items", &["name", "last_seen_at"]),
         ("recognition_tasks", &["id", "method", "state", "started_at"]),
         ("pending_recognitions", &["id", "created_at", "reason", "payload"]),
@@ -185,6 +192,18 @@ fn add_avatar_thumb(conn: &Connection) -> Result<()> {
     if !columns.iter().any(|c| c == "avatar_thumb") {
         conn.execute_batch("ALTER TABLE characters ADD COLUMN avatar_thumb TEXT")?;
         tracing::info!("migrated: added characters.avatar_thumb");
+    }
+    Ok(())
+}
+
+/// v7: `character_appearance.method`（外观取样算法版本）。
+fn add_appearance_method(conn: &Connection) -> Result<()> {
+    let columns = table_columns(conn, "character_appearance")?;
+    if !columns.iter().any(|c| c == "method") {
+        conn.execute_batch(
+            "ALTER TABLE character_appearance ADD COLUMN method INTEGER NOT NULL DEFAULT 0",
+        )?;
+        tracing::info!("migrated: added character_appearance.method");
     }
     Ok(())
 }

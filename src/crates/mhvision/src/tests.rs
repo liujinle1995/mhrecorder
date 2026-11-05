@@ -769,6 +769,7 @@ fn look(hair: [u8; 3], weapon: Option<[u8; 3]>) -> mhcore::AppearanceSignature {
     mhcore::AppearanceSignature {
         hair_name: nearest_name(&HAIR_PALETTE, hair),
         hair_rgb: hair,
+        method: crate::appearance::APPEARANCE_METHOD,
         weapon_name: weapon.map(|w| nearest_name(&ACCENT_PALETTE, w)),
         weapon_rgb: weapon,
     }
@@ -867,10 +868,67 @@ fn different_hair_is_not_a_match() {
     assert!(visual(&current, &refs, Some(&now)).is_none());
 }
 
+/// 立绘色块要能从"上半屏是游戏背景"的窗口截图里认出来。
+///
+/// 背景（雪山）又暗又饱和，只要扫描从画面顶部开始，它就会成为最长的一段，
+/// 取样窗口跟着跑到天上去——这就是"同一角色两张图发色相差 78"的直接原因。
+#[test]
+fn character_band_ignores_the_game_background_above_the_panel() {
+    let mut img = image::RgbaImage::from_pixel(800, 600, image::Rgba([246, 238, 216, 255]));
+    // 顶部的游戏背景：整幅宽度，暗且偏蓝，比角色还"长"。
+    for y in 20..130 {
+        for x in 0..800 {
+            img.put_pixel(x, y, image::Rgba([38, 58, 96, 255]));
+        }
+    }
+    // 角色的立绘：只在左栏，位置更低。
+    for y in 380..540 {
+        for x in 128..248 {
+            img.put_pixel(x, y, image::Rgba([62, 50, 44, 255]));
+        }
+    }
+    let (top, bottom) =
+        character_band(&img, ScreenKind::CharacterAttributes).expect("应当找到立绘色块");
+    assert!((370..=400).contains(&top), "top={top} 落到了背景上");
+    assert!((520..=550).contains(&bottom), "bottom={bottom}");
+}
+
+/// 发色差得远只是把这条证据压到 0，不再把整条证据删掉。
+///
+/// 删除的后果是"同一个金发角色，两张截图分别读成深棕和赤红"直接变成不关联；
+/// 压到 0 之后，面板 / 评分 / 时间这些其它依据还能把结论救回来。
+#[test]
+fn far_hair_lowers_the_signal_instead_of_deleting_it() {
+    let policy = MatchPolicy::default();
+    let stored = look([30, 30, 34], None);
+    let current = look([220, 200, 120], None);
+    let (strength, detail) = appearance_strength(&current, &stored, &policy)
+        .expect("差得远的发色仍然要产出一条证据，只是强度为 0");
+    assert_eq!(strength, 0.0);
+    assert!(detail.contains("差异较大"), "{detail}");
+}
+
+/// 两版取样器的读数不能比 RGB 距离。
+///
+/// 旧版（method 0）的取样框在窗口截图上落在标题栏上，读数本身就是错的；
+/// 拿它和新版比距离，等于把升级前录的角色全部判成"另一个发色的人"。
+#[test]
+fn signatures_from_different_extractors_are_not_compared() {
+    let policy = MatchPolicy::default();
+    let mut stored = look([30, 30, 34], None);
+    stored.method = 0;
+    let current = look([30, 30, 34], None);
+    let (strength, detail) = appearance_strength(&current, &stored, &policy).unwrap();
+    assert!(
+        (strength - policy.method_mismatch_strength).abs() < 1e-9,
+        "{strength}"
+    );
+    assert!(detail.contains("取样方式已更新"), "{detail}");
+}
+
 /// Two characters sharing a look must not be guessed between.
 #[test]
-fn identical_looks_stay_unresolved() {
-    let same = Some(look([84, 82, 94], Some([87, 197, 211])));
+fn identical_looks_stay_unresolved() {    let same = Some(look([84, 82, 94], Some([87, 197, 211])));
     let refs = vec![
         look_ref("c1", "莫莫莫", panel_thumb_of("real_character_attributes.png"), same.clone()),
         look_ref("c2", "鱼鱼鱼", panel_thumb_of("real_window_capture.png"), same),
